@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "superlotto-model"
+version = "0.1.0"
+description = "Auditable SuperLotto Plus bundle modeling workflow"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "requests>=2.32",
+  "beautifulsoup4>=4.12",
+  "lxml>=5.2",
+  "pydantic>=2.8",
+  "python-dateutil>=2.9"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.2", "ruff>=0.5", "mypy>=1.10"]
+
+[project.scripts]
+slp = "slp_model.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
