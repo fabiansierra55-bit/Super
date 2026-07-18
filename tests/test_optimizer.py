@@ -201,16 +201,25 @@ def test_fair_optimizer_reaches_exact_coverage_certificate() -> None:
         seed=seed,
     )
 
+    fair_constraints = OptimizerConstraints(
+        max_main_overlap=1,
+        pair_cap=1,
+        mega_soft_cap=1,
+        mega_hard_cap=2,
+    )
     result = optimize_fair_coverage(
         pool,
         model,
         seed=seed ^ 0xA5A5A5A55A5A5A5A,
-        constraints=OptimizerConstraints(
-            max_main_overlap=1,
-            pair_cap=1,
-            mega_soft_cap=1,
-            mega_hard_cap=2,
-        ),
+        constraints=fair_constraints,
+        marginal_simulations=128,
+        restarts=1,
+    )
+    replay = optimize_fair_coverage(
+        pool,
+        model,
+        seed=seed ^ 0xA5A5A5A55A5A5A5A,
+        constraints=fair_constraints,
         marginal_simulations=128,
         restarts=1,
     )
@@ -226,6 +235,10 @@ def test_fair_optimizer_reaches_exact_coverage_certificate() -> None:
     assert pool.content_sha256() == (
         "ad61dea89d07af4ade6a7094f8fc9b547a99b2fdfa1f01706a44edac477f2c7e"
     )
+    assert tuple(candidate.signature for candidate in result.candidates) == tuple(
+        candidate.signature for candidate in replay.candidates
+    )
+    assert result.marginal_contributions == replay.marginal_contributions
     assert exact.covered_ge_3_mains_count == 258_582
     assert exact.covered_ge_4_mains_count == 6_330
     assert exact.covered_3_plus_mega_count == 264_630
@@ -235,7 +248,7 @@ def test_fair_optimizer_reaches_exact_coverage_certificate() -> None:
     assert report.maximum_mega_repetition <= 2
 
 
-def test_fair_optimizer_deterministically_certifies_60_lines() -> None:
+def test_fair_optimizer_certifies_60_lines_across_supported_runtimes() -> None:
     model = fair_uniform_model(_model())
     seed = 13_628_164_553_973_667_705
     previous = (1, 2, 3, 4, 5)
@@ -269,6 +282,12 @@ def test_fair_optimizer_deterministically_certifies_60_lines() -> None:
     )
     main_degrees = Counter(number for ticket in result.tickets for number in ticket.mains)
 
+    # Candidate construction is portable. Optimizer tie-breaking is seeded and
+    # deterministic within one numerical runtime, but the selected certificate
+    # need not use identical generation indices across NumPy/Python versions.
+    assert pool.content_sha256() == (
+        "ad61dea89d07af4ade6a7094f8fc9b547a99b2fdfa1f01706a44edac477f2c7e"
+    )
     assert matches_fair_coverage_certificate(exact, 60)
     assert exact.covered_ge_3_mains_count == certificate.covered_ge_3_mains_count
     assert result.tier_counts == {
@@ -290,68 +309,6 @@ def test_fair_optimizer_deterministically_certifies_60_lines() -> None:
         len(set(candidate.ticket.mains) & set(previous)) <= 1
         for candidate in result.candidates
         if candidate.tier == "aggressive"
-    )
-    assert tuple(candidate.generation_index for candidate in result.candidates) == (
-        3_700,
-        38_268,
-        28_773,
-        9_133,
-        30_565,
-        16_331,
-        19_442,
-        30_566,
-        46_574,
-        3_755,
-        41_969,
-        7_764,
-        49_335,
-        21_653,
-        46_599,
-        21_107,
-        38_271,
-        10_942,
-        23_290,
-        8_301,
-        45_246,
-        23_422,
-        10_599,
-        1_706,
-        11_519,
-        29_668,
-        36_487,
-        18_047,
-        31_529,
-        27_420,
-        38_447,
-        7_277,
-        15_582,
-        11_469,
-        36_922,
-        44_265,
-        2_108,
-        2_796,
-        286,
-        41_931,
-        20_510,
-        29_838,
-        26_841,
-        39_569,
-        42_265,
-        48_178,
-        43_138,
-        17_352,
-        24_954,
-        3_423,
-        36_084,
-        40_537,
-        21_261,
-        19_246,
-        26_890,
-        10_963,
-        4_492,
-        7_817,
-        34_182,
-        36_109,
     )
 
 
