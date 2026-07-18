@@ -145,9 +145,11 @@ evidence.
 
 The v5 candidate pool remains immutably labeled
 `deterministic-tiered-weighted-sampling-v1`. CI portability review established
-that v1 replay is environment-bound: the canonical NumPy 2.5.1 runtime
-reconstructs its recorded pool, while NumPy 2.4 does not. No v5 bytes were
-changed. New generation now defaults to
+that v1 replay is bound to the complete originating numerical environment, not
+merely a Python or NumPy version; even nominally matching Linux runners can
+differ from the originating Darwin result. No v5 bytes were changed. CI checks
+their immutable identities and semantic contents without treating an
+unsupported replay as corruption. New generation now defaults to
 `portable-fixed-point-splitmix64-v2`, whose digest excludes unused float noise
 and binds fixed-point tier weights plus the prior draw. The production-sized v2
 golden pool is exercised in both supported Python jobs.
