@@ -1,0 +1,38 @@
+{
+  "artifact_stem": "backtest-2026-07-15-cef4a11d83ff00c4",
+  "immutability_policy": "This sidecar is append-only audit evidence. A correction must create a new versioned sidecar and preserve this file.",
+  "invalidation_id": "backtest-invalidation-cef4a11d83ff00c4-v1",
+  "invalidated_artifacts": [
+    {
+      "path": "reports/backtests/backtest-2026-07-15-cef4a11d83ff00c4.json",
+      "sha256": "cef4a11d83ff00c452d86afd4e0f116242dfe3b3e485a3e6180726491c138659"
+    },
+    {
+      "path": "reports/backtests/backtest-2026-07-15-cef4a11d83ff00c4.md",
+      "sha256": "903ebd93e2f7b373fb84cb30ff473c9418db34a9e81a618a70fa2d53dca861ab"
+    }
+  ],
+  "misleading_embedded_claims": {
+    "json_no_future_information": true,
+    "json_report_type": "cutoff_safe_walk_forward_backtest",
+    "markdown_heading": "Cutoff-safe SuperLotto Plus backtest",
+    "markdown_no_future_information": true
+  },
+  "original_bytes_preserved": true,
+  "reason": "The report seed was derived from the complete history snapshot hash, which included the target draw and later draws. That makes the sampled candidate bundles dependent on future content even though each model fit used a historical prefix.",
+  "reason_code": "full_history_seed_leakage",
+  "recorded_timestamp_utc": "2026-07-18T02:00:50Z",
+  "replacement_artifacts": [
+    {
+      "path": "reports/backtests/backtest-2026-07-15-bb46bccd81f51c02.json",
+      "sha256": "bb46bccd81f51c028bdabea2a3f974688e1342fa0e886e6dbc76d5e94e2e569f"
+    },
+    {
+      "path": "reports/backtests/backtest-2026-07-15-bb46bccd81f51c02.md",
+      "sha256": "57b9ecb39708ed724fdaf504598298262fd2bc692098dadf58d50fbc70d0c986"
+    }
+  ],
+  "schema_version": "slp-backtest-invalidation-v1",
+  "scope": "invalidated_for_model_performance_evaluation",
+  "status": "invalidated"
+}

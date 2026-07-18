@@ -24,7 +24,8 @@ Python 3.11 or newer is required; CI tests both Python 3.11 and 3.13 from
 
 ```bash
 python3.13 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install -r requirements.lock
+.venv/bin/python -m pip install -e . --no-deps
 cp config.example.json config.json  # optional; validated defaults work without it
 ```
 
@@ -32,6 +33,8 @@ The installed entry point is `slp`:
 
 ```bash
 slp status
+slp show-bundle
+slp odds
 slp rebuild-history
 slp verify-latest
 slp generate
@@ -67,7 +70,17 @@ Re-running a successful operation is idempotent: it returns the existing content
 - Cutoff-safe walk-forward complete-bundle performance is the selection target; held-out log-likelihood is only a stability gate.
 - Full adaptive reselection at least every ten scored draws, with earlier drift, configuration, rule, or persistent-underperformance triggers.
 - Deterministic weighted sampling of at least 50,000 unique valid candidate tickets.
+- SHA-256 binding of the complete ordered candidate pool.
 - Simulation-backed greedy submodular selection using each candidate's marginal bundle contribution.
+- An exact fair-uniform structural challenger, evaluated over all `1,533,939`
+  valid main draws. Evidence schema v3 requires the configured improvement over
+  the model-selected candidate, a separate non-regression check against any
+  same-date incumbent, preserved 4+/jackpot coverage, and the configured
+  max-overlap-one, pairwise-linear 30-line certificate: `258,582` covered 3+
+  main draws and `264,630` covered 3+Mega full outcomes. The evidence also binds
+  stable model-conditional estimates for both choices and records the tradeoff;
+  while fitted-model skill remains unvalidated, the explicit policy favors
+  exact fair-null robustness rather than an unsupported modeled advantage.
 - Adaptive final simulation until Wilson confidence intervals meet the configured tolerance for consecutive batches.
 - Mild positional recentering is screened locally, then accepted only when a
   separate common-scenario production-scale comparison is stable, the global
@@ -75,16 +88,28 @@ Re-running a successful operation is idempotent: it returns the existing content
 
 Production bundles contain ten genuinely distinct Aggressive, Balanced, and Conservative lines. Aggressive candidates emphasize recent conviction and may overlap the previous official mains by at most one; Balanced lines emphasize marginal bundle coverage; Conservative lines blend toward the stable long-run distribution.
 
+`slp odds` reports exact fair-uniform combinatorial coverage separately from
+model-conditional simulation. The latter is an experimental assumption, not
+an objective lottery probability. For 30 distinct full tickets, jackpot
+coverage is always `30 / 41,416,353` (about 1 in 1,380,545); number selection
+cannot improve that quantity. Reducing overlap waste can increase the fair
+probability that at least one line reaches a lower-match threshold by reducing
+correlated coverage. It does not change a line's fair odds, increase the
+expected number of prizes, or establish a player or expected-value edge.
+
 ## Bundle constraints
 
 - No duplicate full ticket or main set.
 - Maximum three shared mains and minimum two main replacements between tickets.
 - Any main pair appears at most twice; any triple appears at most once.
+- A promoted fair-coverage bundle tightens main overlap and pair repetition to
+  one, balances all 150 main incidences, and permits Mega repeats only between
+  main-disjoint lines.
 - Mega repeats receive a soft penalty and cannot exceed the hard cap.
 - Reused mains, pairs, triples, correlated tickets, and excess Mega repetition incur anti-cannibalization penalties.
 - Adjacency is allowed. Parity and band rules are disabled.
 
-Every locked bundle directory includes canonical JSON, a line CSV, and a checksum manifest. Metadata captures the bundle/draw identities, timestamps, rule/model versions, full configuration snapshot and hash, seed, source evidence, history cutoff/snapshot hash, selected independent hyperparameters, candidate and simulation counts, confidence result, optimizer settings, constraints, and all marginal contributions.
+Every locked bundle directory includes canonical JSON, a line CSV, and a checksum manifest. Metadata captures the bundle/draw identities, timestamps, rule/model versions, full configuration snapshot and hash, seed, source evidence, history cutoff/snapshot hash, selected independent hyperparameters, candidate-pool digest, candidate and simulation counts, model-conditional confidence result, exact fair-uniform coverage, promotion evidence, optimizer settings, constraints, and all marginal contributions.
 
 ## Immutable data layout
 
@@ -126,8 +151,11 @@ historical correction was applied.
 
 See [the audit report](docs/LEGACY_AUDIT.md) and [machine-readable manifest](data/reconciled/legacy_audit_manifest.json).
 
-The production handoff review and preserved-v1/corrected-v2 rationale are in
-[the production audit](docs/PRODUCTION_AUDIT.md).
+At the 2026-07-17 release audit, the immutable correction chain contains five
+July 18 bundles and four calibrations across 230 hash-chained audit events.
+Versions v1 through v4 remain preserved; v4 is retained as gate-regression
+evidence, and `slp-2026-07-18-v5-ca0077ce15c2753f` is the sole active bundle.
+The complete rationale is in [the production audit](docs/PRODUCTION_AUDIT.md).
 
 ## Validation and automation
 
@@ -138,6 +166,16 @@ mypy src
 pytest -q
 ```
 
-GitHub Actions runs formatting, lint, type checks, and tests for pushes and pull requests. The scheduled production workflow runs on Wednesday/Saturday evenings Pacific, uses the same fail-closed CLI, opens a date-stable artifact branch and PR, uploads prediction/scoring manifests and CSVs, and creates a deduplicated failure issue plus workflow summary. It never purchases tickets or touches lottery accounts.
+GitHub Actions runs formatting, lint, type checks, and tests for pushes and
+pull requests. Pacific-time triggers schedule the production cycle for 8:30,
+9:00, 9:30, and 10:00 p.m. on Wednesday/Saturday evenings so delayed source
+publication can recover idempotently. GitHub may coalesce intermediate pending
+runs when an earlier run is still active. The workflow uses the same
+fail-closed CLI, reuses a date-stable artifact branch and PR, and uploads the
+complete data/report/audit evidence. If a later lifecycle stage fails after
+`slp audit` succeeds, only the audited `data/` changes may pass CI and merge;
+the workflow still fails and updates the single reusable incident issue.
+Reports are published only after a complete successful cycle. It never
+purchases tickets or touches lottery accounts.
 
 More detail: [architecture](docs/ARCHITECTURE.md), [operations](docs/OPERATIONS.md), and [handoff audit](docs/LEGACY_AUDIT.md).
