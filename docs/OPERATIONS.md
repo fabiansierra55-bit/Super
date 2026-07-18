@@ -84,6 +84,13 @@ the tradeoff when the unvalidated-model robustness policy chooses the fair
 challenger. Production generation always enforces at least 50,000 candidates.
 Reports are content-addressed and never overwrite a prior report.
 
+New candidate pools use `portable-fixed-point-splitmix64-v2`. Their digest is
+portable across the supported CI matrix and is invariant to generation batch
+size. Historical v1 pool replay is a forensic operation: run it only with the
+locked canonical NumPy 2.5.1 environment, pass the recorded algorithm version
+(treat a missing version as v1), and never interpret a replay mismatch on a
+different numerical runtime as permission to alter the locked bundle.
+
 ## GitHub automation
 
 The scheduled workflow uses a stable `automation/slp-cycle-YYYY-MM-DD` branch.

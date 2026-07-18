@@ -7,6 +7,7 @@ import math
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Decimal, localcontext
 from statistics import NormalDist
 from typing import overload
 
@@ -16,8 +17,14 @@ from numpy.typing import NDArray
 from .modeling import FittedModel, TierName
 from .models import Draw, Ticket
 
-CANDIDATE_POOL_ALGORITHM_VERSION = "deterministic-tiered-weighted-sampling-v1"
-CANDIDATE_POOL_DIGEST_VERSION = "candidate-pool-v1"
+LEGACY_CANDIDATE_POOL_ALGORITHM_VERSION = "deterministic-tiered-weighted-sampling-v1"
+LEGACY_CANDIDATE_POOL_DIGEST_VERSION = "candidate-pool-v1"
+CANDIDATE_POOL_ALGORITHM_VERSION = "portable-fixed-point-splitmix64-v2"
+CANDIDATE_POOL_DIGEST_VERSION = "candidate-pool-v2"
+
+_UINT64_RANGE = 1 << 64
+_UINT64_MASK = _UINT64_RANGE - 1
+_PORTABLE_WEIGHT_SCALE = 1_000_000_000
 
 PRODUCTION_MINIMUM_CANDIDATES = 50_000
 TIERS: tuple[TierName, ...] = ("aggressive", "balanced", "conservative")
@@ -40,6 +47,10 @@ class CandidatePool(Sequence[Candidate]):
     candidates: tuple[Candidate, ...]
     seed: int
     requested_size: int
+    algorithm_version: str = CANDIDATE_POOL_ALGORITHM_VERSION
+    digest_version: str = CANDIDATE_POOL_DIGEST_VERSION
+    sampling_weights_sha256: str | None = None
+    previous_mains: tuple[int, ...] = ()
 
     def __len__(self) -> int:
         return len(self.candidates)
@@ -64,17 +75,58 @@ class CandidatePool(Sequence[Candidate]):
         """Bind the complete ordered pool without persisting 50,000 CSV rows."""
 
         digest = hashlib.sha256()
-        digest.update(
-            f"{CANDIDATE_POOL_DIGEST_VERSION}|{self.seed}|{self.requested_size}\n".encode()
-        )
+        if self.digest_version == LEGACY_CANDIDATE_POOL_DIGEST_VERSION:
+            header = f"{self.digest_version}|{self.seed}|{self.requested_size}\n"
+        else:
+            if self.sampling_weights_sha256 is None:
+                raise ValueError("portable pool digest requires a sampling-weight hash")
+            header = (
+                f"{self.digest_version}|{self.algorithm_version}|{self.seed}|"
+                f"{self.requested_size}|{','.join(map(str, self.previous_mains))}|"
+                f"{self.sampling_weights_sha256}\n"
+            )
+        digest.update(header.encode())
         for candidate in self.candidates:
             record = (
                 f"{candidate.generation_index}|{candidate.tier}|"
-                f"{','.join(map(str, candidate.ticket.mains))}|{candidate.ticket.mega}|"
-                f"{candidate.sampling_log_weight.hex()}\n"
+                f"{','.join(map(str, candidate.ticket.mains))}|{candidate.ticket.mega}"
             )
+            if self.digest_version == LEGACY_CANDIDATE_POOL_DIGEST_VERSION:
+                record += f"|{candidate.sampling_log_weight.hex()}"
+            record += "\n"
             digest.update(record.encode())
         return digest.hexdigest()
+
+
+class _PortableRandom:
+    """Small, specified integer PRNG for cross-runtime artifact reproduction.
+
+    NumPy's high-level weighted sampling and platform math libraries are not a
+    stable serialization format.  SplitMix64 has a compact, public integer
+    transition, so the same seed produces the same stream on every supported
+    Python and operating system.
+    """
+
+    def __init__(self, seed: int) -> None:
+        if not 0 <= int(seed) < _UINT64_RANGE:
+            raise ValueError("portable random seed must be in 0..2**64-1")
+        self._state = int(seed)
+
+    def next_uint64(self) -> int:
+        self._state = (self._state + 0x9E3779B97F4A7C15) & _UINT64_MASK
+        value = self._state
+        value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _UINT64_MASK
+        value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _UINT64_MASK
+        return (value ^ (value >> 31)) & _UINT64_MASK
+
+    def randbelow(self, stop: int) -> int:
+        if stop <= 0 or stop > _UINT64_RANGE:
+            raise ValueError("portable random bound must be in 1..2**64")
+        limit = _UINT64_RANGE - (_UINT64_RANGE % stop)
+        while True:
+            value = self.next_uint64()
+            if value < limit:
+                return value % stop
 
 
 @dataclass(frozen=True)
@@ -148,6 +200,141 @@ def _sample_main_batch(
     return values.astype(np.int16, copy=False)
 
 
+def _integerize_decimal_weights(values: Sequence[Decimal]) -> tuple[int, ...]:
+    total = sum(values, start=Decimal(0))
+    if total <= 0 or any(value <= 0 for value in values):
+        raise ValueError("portable sampling weights must be positive")
+    scale = Decimal(_PORTABLE_WEIGHT_SCALE)
+    quotas = tuple(value * scale / total for value in values)
+    floors = [int(quota.to_integral_value(rounding=ROUND_FLOOR)) for quota in quotas]
+    missing = _PORTABLE_WEIGHT_SCALE - sum(floors)
+    order = sorted(
+        range(len(quotas)),
+        key=lambda index: (quotas[index] - floors[index], -index),
+        reverse=True,
+    )
+    for index in order[:missing]:
+        floors[index] += 1
+    if any(weight <= 0 for weight in floors) or sum(floors) != _PORTABLE_WEIGHT_SCALE:
+        raise ValueError("portable probability quantization failed")
+    return tuple(floors)
+
+
+def _portable_component_weights(
+    base_values: Sequence[float],
+    short_or_stable_values: Sequence[float],
+    *,
+    tier: TierName,
+    aggressive_other_weight: Decimal,
+    aggressive_power: Decimal,
+    conservative_power: Decimal,
+) -> tuple[int, ...]:
+    base = tuple(Decimal.from_float(float(value)) for value in base_values)
+    other = tuple(Decimal.from_float(float(value)) for value in short_or_stable_values)
+    if len(base) != len(other):
+        raise ValueError("portable tier probability supports do not match")
+    if tier == "balanced":
+        values = base
+    elif tier == "aggressive":
+        base_exponent = (Decimal(1) - aggressive_other_weight) * aggressive_power
+        other_exponent = aggressive_other_weight * aggressive_power
+        values = tuple(
+            (base_value.ln() * base_exponent + other_value.ln() * other_exponent).exp()
+            for base_value, other_value in zip(base, other, strict=True)
+        )
+    elif tier == "conservative":
+        values = tuple(
+            (
+                (Decimal("0.35") * base_value + Decimal("0.65") * other_value).ln()
+                * conservative_power
+            ).exp()
+            for base_value, other_value in zip(base, other, strict=True)
+        )
+    else:
+        raise ValueError(f"unknown tier: {tier}")
+    return _integerize_decimal_weights(values)
+
+
+def _portable_tier_weights(
+    model: FittedModel, tier: TierName
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Derive fixed-point tier weights with Python's decimal arithmetic.
+
+    The calculation mirrors ``FittedModel.tier_probabilities`` but starts from
+    the exact IEEE-754 values locked in the calibration artifact and avoids
+    NumPy/libm.  A fixed context and largest-remainder normalization make the
+    resulting integer vectors part of the versioned sampling contract.
+    """
+
+    with localcontext() as context:
+        context.prec = 50
+        context.rounding = ROUND_HALF_EVEN
+        mains_other = (
+            model.recent_mains_probabilities
+            if tier == "aggressive"
+            else model.stable_mains_probabilities
+        )
+        mega_other = (
+            model.recent_mega_probabilities
+            if tier == "aggressive"
+            else model.stable_mega_probabilities
+        )
+        mains = _portable_component_weights(
+            model.mains_probabilities,
+            mains_other,
+            tier=tier,
+            aggressive_other_weight=Decimal("0.62"),
+            aggressive_power=Decimal("1.18"),
+            conservative_power=Decimal("0.92"),
+        )
+        mega = _portable_component_weights(
+            model.mega_probabilities,
+            mega_other,
+            tier=tier,
+            aggressive_other_weight=Decimal("0.58"),
+            aggressive_power=Decimal("1.12"),
+            conservative_power=Decimal("0.94"),
+        )
+    return mains, mega
+
+
+def _sampling_weights_sha256(
+    weights: dict[TierName, tuple[tuple[int, ...], tuple[int, ...]]],
+) -> str:
+    digest = hashlib.sha256(b"candidate-pool-fixed-point-weights-v1\n")
+    for tier in TIERS:
+        mains, mega = weights[tier]
+        digest.update(f"{tier}|{','.join(map(str, mains))}|{','.join(map(str, mega))}\n".encode())
+    return digest.hexdigest()
+
+
+def _portable_weighted_index(
+    weights: Sequence[int],
+    rng: _PortableRandom,
+    *,
+    excluded: frozenset[int] = frozenset(),
+) -> int:
+    total = sum(weight for index, weight in enumerate(weights) if index not in excluded)
+    target = rng.randbelow(total)
+    cumulative = 0
+    for index, weight in enumerate(weights):
+        if index in excluded:
+            continue
+        cumulative += weight
+        if target < cumulative:
+            return index
+    raise RuntimeError("portable weighted selection did not resolve an index")
+
+
+def _portable_main_sample(
+    weights: Sequence[int], rng: _PortableRandom
+) -> tuple[int, int, int, int, int]:
+    selected: set[int] = set()
+    while len(selected) < 5:
+        selected.add(_portable_weighted_index(weights, rng, excluded=frozenset(selected)))
+    return tuple(index + 1 for index in sorted(selected))  # type: ignore[return-value]
+
+
 def _previous_mains(previous_draw: Draw | Sequence[int] | None) -> frozenset[int]:
     if previous_draw is None:
         return frozenset()
@@ -161,7 +348,7 @@ def _previous_mains(previous_draw: Draw | Sequence[int] | None) -> frozenset[int
     return frozenset(int(value) for value in values)
 
 
-def generate_candidate_pool(
+def _generate_candidate_pool_legacy(
     model: FittedModel,
     *,
     size: int = PRODUCTION_MINIMUM_CANDIDATES,
@@ -170,11 +357,11 @@ def generate_candidate_pool(
     enforce_production_minimum: bool = True,
     batch_size: int = 8_192,
 ) -> CandidatePool:
-    """Generate a unique, reproducible pool using weighted sampling.
+    """Reproduce the original NumPy-based sampler when its runtime matches.
 
-    Production calls enforce at least 50,000 full-ticket signatures.  Tests and
-    small diagnostic backtests may explicitly disable that guard.  Main sets
-    are sampled without replacement; Mega is sampled independently.
+    Version 1 is retained only for forensic replay.  Its high-level NumPy
+    choices and float-bearing digest are intentionally not used for new
+    production artifacts because they vary across NumPy/platform combinations.
     """
 
     if size <= 0:
@@ -240,7 +427,124 @@ def generate_candidate_pool(
             if attempts > max(100_000, target * 200):
                 raise RuntimeError(f"could not generate {target} unique {tier} candidates")
 
-    return CandidatePool(tuple(candidates), int(seed), size)
+    return CandidatePool(
+        tuple(candidates),
+        int(seed),
+        size,
+        algorithm_version=LEGACY_CANDIDATE_POOL_ALGORITHM_VERSION,
+        digest_version=LEGACY_CANDIDATE_POOL_DIGEST_VERSION,
+    )
+
+
+def _generate_candidate_pool_portable(
+    model: FittedModel,
+    *,
+    size: int,
+    seed: int,
+    previous_draw: Draw | Sequence[int] | None,
+    enforce_production_minimum: bool,
+    batch_size: int,
+) -> CandidatePool:
+    if size <= 0:
+        raise ValueError("candidate-pool size must be positive")
+    if enforce_production_minimum and size < PRODUCTION_MINIMUM_CANDIDATES:
+        raise ValueError(
+            f"production candidate pools require at least {PRODUCTION_MINIMUM_CANDIDATES:,} tickets"
+        )
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    prior = _previous_mains(previous_draw)
+    rng = _PortableRandom(seed)
+    targets = _tier_target_counts(size)
+    signatures: set[tuple[tuple[int, ...], int]] = set()
+    candidates: list[Candidate] = []
+    tier_weights = {tier: _portable_tier_weights(model, tier) for tier in TIERS}
+    weights_sha256 = _sampling_weights_sha256(tier_weights)
+
+    for tier in TIERS:
+        mains_weights, mega_weights = tier_weights[tier]
+        mains_total = sum(mains_weights)
+        mega_total = sum(mega_weights)
+        accepted = 0
+        attempts = 0
+        target = targets[tier]
+        while accepted < target:
+            remaining = target - accepted
+            sample_size = min(batch_size, max(256, int(remaining * 1.3)))
+            attempts += sample_size
+            for _ in range(sample_size):
+                mains = _portable_main_sample(mains_weights, rng)
+                mega = _portable_weighted_index(mega_weights, rng) + 1
+                if tier == "aggressive" and prior and len(set(mains) & prior) > 1:
+                    continue
+                signature = (mains, mega)
+                if signature in signatures:
+                    continue
+                signatures.add(signature)
+                log_weight = float(
+                    sum(math.log(mains_weights[value - 1] / mains_total) for value in mains)
+                    + math.log(mega_weights[mega - 1] / mega_total)
+                )
+                candidates.append(
+                    Candidate(
+                        ticket=Ticket(mains=mains, mega=mega),
+                        tier=tier,
+                        generation_index=len(candidates),
+                        sampling_log_weight=log_weight,
+                    )
+                )
+                accepted += 1
+                if accepted == target:
+                    break
+            if attempts > max(100_000, target * 200):
+                raise RuntimeError(f"could not generate {target} unique {tier} candidates")
+
+    return CandidatePool(
+        tuple(candidates),
+        int(seed),
+        size,
+        sampling_weights_sha256=weights_sha256,
+        previous_mains=tuple(sorted(prior)),
+    )
+
+
+def generate_candidate_pool(
+    model: FittedModel,
+    *,
+    size: int = PRODUCTION_MINIMUM_CANDIDATES,
+    seed: int,
+    previous_draw: Draw | Sequence[int] | None = None,
+    enforce_production_minimum: bool = True,
+    batch_size: int = 8_192,
+    algorithm_version: str = CANDIDATE_POOL_ALGORITHM_VERSION,
+) -> CandidatePool:
+    """Generate a unique, versioned pool using weighted sampling.
+
+    Version 2 uses only specified uint64 transitions and fixed-point selection
+    for the artifact-bearing pool.  Supplying the legacy version is supported
+    for forensic replay, but new callers use the portable version by default.
+    """
+
+    if algorithm_version == CANDIDATE_POOL_ALGORITHM_VERSION:
+        return _generate_candidate_pool_portable(
+            model,
+            size=size,
+            seed=seed,
+            previous_draw=previous_draw,
+            enforce_production_minimum=enforce_production_minimum,
+            batch_size=batch_size,
+        )
+    if algorithm_version == LEGACY_CANDIDATE_POOL_ALGORITHM_VERSION:
+        return _generate_candidate_pool_legacy(
+            model,
+            size=size,
+            seed=seed,
+            previous_draw=previous_draw,
+            enforce_production_minimum=enforce_production_minimum,
+            batch_size=batch_size,
+        )
+    raise ValueError(f"unsupported candidate-pool algorithm version: {algorithm_version}")
 
 
 def _sample_draw_arrays(
@@ -414,6 +718,10 @@ def estimate_bundle_metrics(
 
 
 __all__ = [
+    "CANDIDATE_POOL_ALGORITHM_VERSION",
+    "CANDIDATE_POOL_DIGEST_VERSION",
+    "LEGACY_CANDIDATE_POOL_ALGORITHM_VERSION",
+    "LEGACY_CANDIDATE_POOL_DIGEST_VERSION",
     "PRODUCTION_MINIMUM_CANDIDATES",
     "TIERS",
     "BundleSimulationMetrics",

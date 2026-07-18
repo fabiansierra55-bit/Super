@@ -69,8 +69,12 @@ Re-running a successful operation is idempotent: it returns the existing content
 - Tuned draw-unit exponential half-lives.
 - Cutoff-safe walk-forward complete-bundle performance is the selection target; held-out log-likelihood is only a stability gate.
 - Full adaptive reselection at least every ten scored draws, with earlier drift, configuration, rule, or persistent-underperformance triggers.
-- Deterministic weighted sampling of at least 50,000 unique valid candidate tickets.
-- SHA-256 binding of the complete ordered candidate pool.
+- Versioned deterministic weighted sampling of at least 50,000 unique valid
+  candidate tickets. New pools use fixed-point tier weights and a specified
+  SplitMix64 integer stream so pool identities replay across supported Python,
+  NumPy, and operating-system combinations.
+- SHA-256 binding of the algorithm version, seed, previous official mains,
+  fixed-point weight snapshot, and complete ordered candidate pool.
 - Simulation-backed greedy submodular selection using each candidate's marginal bundle contribution.
 - An exact fair-uniform structural challenger, evaluated over all `1,533,939`
   valid main draws. Evidence schema v3 requires the configured improvement over
@@ -110,6 +114,14 @@ expected number of prizes, or establish a player or expected-value edge.
 - Adjacency is allowed. Parity and band rules are disabled.
 
 Every locked bundle directory includes canonical JSON, a line CSV, and a checksum manifest. Metadata captures the bundle/draw identities, timestamps, rule/model versions, full configuration snapshot and hash, seed, source evidence, history cutoff/snapshot hash, selected independent hyperparameters, candidate-pool digest, candidate and simulation counts, model-conditional confidence result, exact fair-uniform coverage, promotion evidence, optimizer settings, constraints, and all marginal contributions.
+
+Candidate-pool algorithm v1 remains available only for forensic replay of
+immutable v1-v5 evidence. Its NumPy sampling and float-bearing digest are
+runtime-bound; absence of an algorithm field on an older bundle means v1. New
+generation uses `portable-fixed-point-splitmix64-v2`. This portability claim is
+limited to candidate-pool construction: model fitting, future-draw simulation,
+and optimizer tie-breaking remain locked and auditable but are not represented
+as bit-identical across arbitrary numerical-library builds.
 
 ## Immutable data layout
 

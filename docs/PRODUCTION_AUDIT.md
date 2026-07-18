@@ -143,6 +143,15 @@ durable reason states that it restores certified fair coverage after the
 incumbent-equivalence gate correction while preserving v4 as regression
 evidence.
 
+The v5 candidate pool remains immutably labeled
+`deterministic-tiered-weighted-sampling-v1`. CI portability review established
+that v1 replay is environment-bound: the canonical NumPy 2.5.1 runtime
+reconstructs its recorded pool, while NumPy 2.4 does not. No v5 bytes were
+changed. New generation now defaults to
+`portable-fixed-point-splitmix64-v2`, whose digest excludes unused float noise
+and binds fixed-point tier weights plus the prior draw. The production-sized v2
+golden pool is exercised in both supported Python jobs.
+
 - Model version: `slp-robust-fair-coverage-v4`.
 - Calibration, deterministic seed, selected parameters, and ordered candidate
   pool are identical to v4: calibration `cal-1fbf4901ae333f66b4fa`, seed

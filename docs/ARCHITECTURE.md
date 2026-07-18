@@ -20,6 +20,11 @@ The system treats external result pages, legacy CSVs, caches, and CLI arguments 
    relative tradeoff, and requires the global 30-line coverage certificate.
    While model skill is explicitly unvalidated, the configured policy favors
    fair-null robustness. The full ordered candidate pool is SHA-256 bound.
+   New pools use `portable-fixed-point-splitmix64-v2`: decimal tier transforms
+   are normalized to exact integer weights, unbiased bounded draws come from a
+   specified SplitMix64 transition, and the digest binds the algorithm, seed,
+   previous mains, weight snapshot, and ordered semantic ticket records. The
+   unused floating log weight is deliberately outside the v2 digest.
 10. Positional recenter proposals are bounded and screened locally. The entire
    proposal is then rejected unless original and proposed bundles are stable on
    identical production-scale holdout scenarios, the global objective does
@@ -47,6 +52,14 @@ The system treats external result pages, legacy CSVs, caches, and CLI arguments 
 ## Calibration
 
 Mains and Mega are fitted and selected independently. Every walk-forward fold trains on a prefix whose cutoff precedes its target. The selection rank is bundle performance; likelihood only filters unstable candidates. The 240-draw anchor cannot win without the configured improvement. Calibration artifacts preserve all candidate scores, fold cutoffs, fitted distributions, selected parameters, triggers, parent calibration, history hash, configuration hash, deterministic seed, and scored-draw cadence. Calibration identity is content-derived from the reproducible fit inputs and selected parameters. Replaying the same fit may change only lifecycle timestamps/reasons; storage returns the existing immutable artifact and does not append a duplicate calibration or audit event.
+
+Candidate-pool v1 is frozen for backward compatibility. It used NumPy
+high-level sampling and included an exact floating log weight in its digest, so
+forensic replay requires the canonical NumPy 2.5.1 runtime; a missing historical
+algorithm value resolves to v1. This environment limitation does not rewrite or
+invalidate a locked artifact. All new pools use v2. Whole-pipeline numerical
+portability is not claimed until simulations and optimizer tie-breaking also
+move to specified integer contracts.
 
 ## Simulation objective
 

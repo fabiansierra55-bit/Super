@@ -9,6 +9,7 @@ import slp_model.generation as generation
 from slp_model.modeling import ComponentParameters, ModelParameters, fit_model
 from slp_model.models import Draw
 from slp_model.simulation import (
+    CANDIDATE_POOL_ALGORITHM_VERSION,
     BundleSimulationMetrics,
     estimate_bundle_metrics,
     generate_candidate_pool,
@@ -60,13 +61,26 @@ def test_candidate_pool_is_unique_valid_and_deterministic() -> None:
         previous_draw=previous,
         enforce_production_minimum=False,
     )
+    different_batch = generate_candidate_pool(
+        model,
+        size=900,
+        seed=1827,
+        previous_draw=previous,
+        enforce_production_minimum=False,
+        batch_size=257,
+    )
 
     assert [candidate.signature for candidate in first] == [
         candidate.signature for candidate in second
     ]
     assert len({candidate.signature for candidate in first}) == 900
     assert first.content_sha256() == second.content_sha256()
+    assert first.content_sha256() == different_batch.content_sha256()
     assert len(first.content_sha256()) == 64
+    assert first.algorithm_version == CANDIDATE_POOL_ALGORITHM_VERSION
+    assert first.previous_mains == previous
+    assert first.sampling_weights_sha256 is not None
+    assert len(first.sampling_weights_sha256) == 64
     assert first.tier_counts == {
         "aggressive": 300,
         "balanced": 300,
@@ -78,6 +92,28 @@ def test_candidate_pool_is_unique_valid_and_deterministic() -> None:
         if candidate.tier == "aggressive"
     )
     assert all(len(set(candidate.ticket.mains)) == 5 for candidate in first)
+
+
+@pytest.mark.parametrize("seed", (-1, 1 << 64))
+def test_portable_candidate_pool_rejects_seed_aliases(seed: int) -> None:
+    with pytest.raises(ValueError, match=r"0..2\*\*64-1"):
+        generate_candidate_pool(
+            _model(),
+            size=1,
+            seed=seed,
+            enforce_production_minimum=False,
+        )
+
+
+@pytest.mark.parametrize("seed", (0, (1 << 64) - 1))
+def test_portable_candidate_pool_accepts_uint64_boundaries(seed: int) -> None:
+    pool = generate_candidate_pool(
+        _model(),
+        size=3,
+        seed=seed,
+        enforce_production_minimum=False,
+    )
+    assert len(pool) == 3
 
 
 def test_future_draws_and_adaptive_metrics_are_reproducible() -> None:
