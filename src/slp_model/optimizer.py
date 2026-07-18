@@ -201,7 +201,10 @@ def _new_coverage_counts(
     indices: NDArray[np.int64],
 ) -> NDArray[np.float64]:
     new_bits = np.bitwise_and(packed[indices], np.bitwise_not(covered)[None, :])
-    return _POPCOUNT[new_bits].sum(axis=1, dtype=np.int64).astype(np.float64)
+    return np.asarray(
+        _POPCOUNT[new_bits].sum(axis=1, dtype=np.int64),
+        dtype=np.float64,
+    )
 
 
 def _tier_multipliers(

@@ -174,7 +174,7 @@ def _smoothed_distribution(
     kernel /= kernel.sum(axis=0, keepdims=True)
     smoothed = kernel @ counts
     smoothed = np.maximum(smoothed, np.finfo(np.float64).tiny)
-    return smoothed / smoothed.sum()
+    return np.asarray(smoothed / smoothed.sum(), dtype=np.float64)
 
 
 def _position_summary(
