@@ -1,10 +1,13 @@
+import json
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from slp_model.models import (
     Draw,
+    LockedBundle,
     SourceEvidence,
     VerificationMetadata,
     VerifiedDraw,
@@ -55,3 +58,14 @@ def test_verified_draw_requires_official_and_backup_evidence():
         ),
     )
     assert verified.mains == (1, 2, 3, 4, 5)
+
+
+def test_versioned_correction_evidence_requires_incumbent_binding() -> None:
+    path = Path("data/predictions/locked/2026-07-18/slp-2026-07-18-v5-ca0077ce15c2753f/bundle.json")
+    payload = json.loads(path.read_text(encoding="utf-8"))["bundle"]
+    evidence = payload["metadata"]["optimizer"]["fair_coverage_challenger"]
+    evidence["incumbent"] = None
+    evidence["incumbent_model_simulation"] = None
+
+    with pytest.raises(ValidationError, match="bind its incumbent"):
+        LockedBundle.model_validate(payload)

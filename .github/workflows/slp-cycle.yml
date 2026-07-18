@@ -4,6 +4,10 @@ on:
   schedule:
     - cron: "30 20 * * 3,6"
       timezone: "America/Los_Angeles"
+    - cron: "0,30 21 * * 3,6"
+      timezone: "America/Los_Angeles"
+    - cron: "0 22 * * 3,6"
+      timezone: "America/Los_Angeles"
   workflow_dispatch:
 
 # The production job overrides this only with the capabilities needed to

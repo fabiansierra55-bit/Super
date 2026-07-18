@@ -21,6 +21,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .models import Draw
+from .objectives import ObjectiveMode, effective_event_weights
 
 WINDOWS: tuple[int, ...] = (60, 90, 120, 180, 240)
 ANCHOR_WINDOW = 240
@@ -365,6 +366,8 @@ def _complete_bundle_outcome(
     mains_bundle: Sequence[tuple[int, int, int, int, int]],
     mega_bundle: Sequence[int],
     target: Draw,
+    *,
+    objective_weights: tuple[float, float, float, float] = (1.0, 0.15, 0.10, 0.10),
 ) -> _CompleteBundleOutcome:
     """Score complete tickets against one strictly forward target draw.
 
@@ -390,11 +393,12 @@ def _complete_bundle_outcome(
     # Their combined maximum (0.003) is far below the smallest event reward.
     best_overlap = max(overlaps)
     best_mega_overlap = max(mega_overlaps, default=0)
+    p3_weight, p4_weight, three_mega_weight, four_mega_weight = objective_weights
     objective = (
-        float(any_three_plus)
-        + 0.15 * float(any_four_plus)
-        + 0.05 * float(any_three_plus_mega)
-        + 0.025 * float(any_four_plus_mega)
+        p3_weight * float(any_three_plus)
+        + p4_weight * float(any_four_plus)
+        + three_mega_weight * float(any_three_plus_mega)
+        + four_mega_weight * float(any_four_plus_mega)
         + 0.002 * best_overlap / 5.0
         + 0.001 * best_mega_overlap / 5.0
     )
@@ -532,6 +536,8 @@ def select_hyperparameters(
     random_seed: int = 0,
     anchor_min_improvement: float = 0.01,
     likelihood_stability_margin: float = 1.5,
+    objective_weights: tuple[float, float, float, float] = (1.0, 0.15, 0.10, 0.10),
+    objective_mode: ObjectiveMode = "grind",
 ) -> AdaptiveSelection:
     """Select independent parameters using complete-ticket forward performance.
 
@@ -551,6 +557,9 @@ def select_hyperparameters(
     requested_windows = tuple(sorted({int(value) for value in windows if value > 0}))
     if not requested_windows:
         raise ValueError("at least one candidate window is required")
+    effective_weights = effective_event_weights(objective_mode, objective_weights)
+    if not any(effective_weights):
+        raise ValueError("forward objective requires at least one positive event weight")
     available_windows = tuple(value for value in requested_windows if len(history) >= value + 2)
     if not available_windows:
         raise ValueError("insufficient history for walk-forward selection")
@@ -606,6 +615,7 @@ def select_hyperparameters(
                         main_bundle,
                         fold.baseline_mega,
                         fold.target,
+                        objective_weights=effective_weights,
                     )
                     log_likelihood = float(
                         np.mean([math.log(probabilities[value - 1]) for value in fold.target.mains])
@@ -618,6 +628,7 @@ def select_hyperparameters(
                         fold.baseline_mains,
                         mega_bundle_fold,
                         fold.target,
+                        objective_weights=effective_weights,
                     )
                     log_likelihood = math.log(probabilities[fold.target.mega - 1])
                 bundle_scores.append(outcome.objective)
@@ -666,7 +677,12 @@ def select_hyperparameters(
         mega_bundle = _forward_mega_bundle(
             mega_probabilities, seed=seed ^ 0x9E3779B97F4A7C15, size=forward_bundle_size
         )
-        outcome = _complete_bundle_outcome(mains_bundle, mega_bundle, fold.target)
+        outcome = _complete_bundle_outcome(
+            mains_bundle,
+            mega_bundle,
+            fold.target,
+            objective_weights=effective_weights,
+        )
         joint_scores.append(outcome.objective)
         joint_cutoffs.append(fold.training[-1].draw_date)
 

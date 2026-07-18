@@ -18,8 +18,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .constraints import validate_bundle
+from .fair_odds import exact_uniform_metrics
 from .modeling import FittedModel, TierName
 from .models import Draw, Ticket
+from .objectives import effective_event_weights
 from .simulation import (
     BundleSimulationMetrics,
     Candidate,
@@ -227,20 +229,14 @@ def _tier_multipliers(
 def _objective_coefficients(
     weights: ObjectiveWeights,
 ) -> tuple[float, float, float, float]:
-    if weights.mode == "spike":
-        # Spike mode is the only explicit switch that permits secondary events
-        # to outweigh primary 3+ coverage.
-        return (
-            weights.p_ge_3 * 0.35,
-            max(weights.p_ge_4, 1.0),
-            max(weights.three_plus_mega, 0.25),
-            max(weights.four_plus_mega, 0.50),
-        )
-    return (
-        weights.p_ge_3,
-        weights.p_ge_4,
-        weights.three_plus_mega,
-        weights.four_plus_mega,
+    return effective_event_weights(
+        weights.mode,
+        (
+            weights.p_ge_3,
+            weights.p_ge_4,
+            weights.three_plus_mega,
+            weights.four_plus_mega,
+        ),
     )
 
 
@@ -618,6 +614,164 @@ def optimize_bundle(
     )
 
 
+def optimize_fair_coverage(
+    candidate_pool: CandidatePool | Sequence[Candidate],
+    model: FittedModel,
+    *,
+    seed: int,
+    previous_draw: Draw | Sequence[int] | None = None,
+    constraints: OptimizerConstraints = DEFAULT_OPTIMIZER_CONSTRAINTS,
+    weights: ObjectiveWeights = DEFAULT_OBJECTIVE_WEIGHTS,
+    marginal_simulations: int = 4_096,
+    restarts: int = 4,
+) -> OptimizedBundle:
+    """Build a balanced linear packing and score its exact fair-draw coverage.
+
+    Requiring every main-number pair to be globally unique makes any two lines
+    share at most one main.  The greedy cost is the exact incremental convex
+    reuse cost, so it balances 150 number incidences across 47 labels.  Mega
+    repeats are permitted only between main-disjoint lines, eliminating lost
+    fair 3+Mega coverage.  Multiple deterministic restarts are ranked by exact
+    enumeration, never by a fitted historical distribution.
+    """
+
+    candidates = tuple(candidate_pool)
+    if len(candidates) < constraints.bundle_size:
+        raise OptimizationError("candidate pool is smaller than requested bundle")
+    if restarts <= 0:
+        raise ValueError("fair optimizer restarts must be positive")
+    if marginal_simulations <= 0:
+        raise ValueError("fair marginal simulations must be positive")
+    for tier in _TIER_ORDER:
+        if sum(candidate.tier == tier for candidate in candidates) < constraints.tickets_per_tier:
+            raise OptimizationError(f"candidate pool lacks enough {tier} tickets")
+
+    prior = _previous_main_set(previous_draw)
+    mains, mega, pair_ids, _, tiers = _candidate_arrays(candidates)
+    permanently_compatible = np.ones(len(candidates), dtype=bool)
+    if prior:
+        aggressive = tiers == "aggressive"
+        overlaps_prior = np.asarray(
+            [len(set(int(value) for value in row) & prior) for row in mains]
+        )
+        permanently_compatible &= ~aggressive | (overlaps_prior <= 1)
+
+    schedule = tuple(tier for _ in range(constraints.tickets_per_tier) for tier in _TIER_ORDER)
+    variants: list[tuple[tuple[int, ...], tuple[Candidate, ...]]] = []
+    base_tie_seed = 0x647373683
+    for restart in range(restarts):
+        tie_seed = base_tie_seed if restart == 0 else (seed ^ (restart * 0x9E3779B9))
+        rng = np.random.default_rng(tie_seed)
+        selected_mask = np.zeros(len(candidates), dtype=bool)
+        main_counts = np.zeros(48, dtype=np.int16)
+        pair_counts = np.zeros(48 * 48, dtype=np.int16)
+        mega_counts = np.zeros(28, dtype=np.int16)
+        selected_indices: list[int] = []
+        feasible = True
+
+        for requested_tier in schedule:
+            eligible = (
+                (tiers == requested_tier)
+                & ~selected_mask
+                & permanently_compatible
+                & (mega_counts[mega] < constraints.mega_hard_cap)
+            )
+            eligible &= np.all(pair_counts[pair_ids] == 0, axis=1)
+            # A cap of five is a feasibility guard; the convex score normally
+            # reaches the sharper balanced 38x3 + 9x4 degree distribution.
+            eligible &= np.all(main_counts[mains] < 5, axis=1)
+            for selected_index in selected_indices:
+                same_mega = mega == mega[selected_index]
+                if not np.any(same_mega):
+                    continue
+                overlap = np.count_nonzero(
+                    mains[:, :, None] == mains[selected_index][None, None, :],
+                    axis=(1, 2),
+                )
+                eligible &= ~same_mega | (overlap == 0)
+            eligible_indices = np.flatnonzero(eligible)
+            if eligible_indices.size == 0:
+                feasible = False
+                break
+
+            candidate_mains = mains[eligible_indices]
+            incremental_reuse = main_counts[candidate_mains].sum(axis=1)
+            post_square_cost = np.square(main_counts[candidate_mains] + 1).sum(axis=1)
+            mega_reuse = mega_counts[mega[eligible_indices]]
+            jitter = rng.random(eligible_indices.size) * 1e-3
+            scores = 1_000.0 * incremental_reuse + 10.0 * post_square_cost + mega_reuse + jitter
+            chosen_index = int(eligible_indices[int(np.argmin(scores))])
+            selected_indices.append(chosen_index)
+            selected_mask[chosen_index] = True
+            main_counts[mains[chosen_index]] += 1
+            pair_counts[pair_ids[chosen_index]] += 1
+            mega_counts[mega[chosen_index]] += 1
+
+        if not feasible:
+            continue
+        selected = tuple(candidates[index] for index in selected_indices)
+        selected_tickets = tuple(candidate.ticket for candidate in selected)
+        try:
+            validate_bundle(
+                selected_tickets,
+                max_overlap=min(constraints.max_main_overlap, 1),
+                min_hamming=constraints.min_hamming_distance,
+                pair_cap=1,
+                triple_cap=1,
+                mega_hard_cap=constraints.mega_hard_cap,
+            )
+        except ValueError:
+            continue
+        exact = exact_uniform_metrics(selected_tickets)
+        variants.append(
+            (
+                (
+                    exact.covered_ge_3_mains_count,
+                    exact.covered_3_plus_mega_count,
+                    exact.covered_ge_4_mains_count,
+                    int(round(exact.mean_best_main_matches * 1_000_000_000)),
+                ),
+                selected,
+            )
+        )
+
+    if not variants:
+        raise OptimizationError("fair structural optimizer found no feasible bundle")
+    _, selected = max(variants, key=lambda item: item[0])
+    selected_tickets = tuple(candidate.ticket for candidate in selected)
+    selected_tiers = tuple(candidate.tier for candidate in selected)
+    exact = exact_uniform_metrics(selected_tickets)
+    contributions = measure_bundle_marginals(
+        selected_tickets,
+        selected_tiers,
+        model,
+        seed=seed ^ 0xD1B54A32D192ED03,
+        simulations=marginal_simulations,
+        weights=weights,
+        generation_indices=tuple(candidate.generation_index for candidate in selected),
+        mega_soft_cap=constraints.mega_soft_cap,
+        mega_hard_cap=constraints.mega_hard_cap,
+    )
+    primary, four, three_mega, four_mega = _objective_coefficients(weights)
+    objective = (
+        primary * exact.p_any_ge_3_mains
+        + four * exact.p_any_ge_4_mains
+        + three_mega * exact.p_any_3_plus_mega
+        + four_mega * exact.p_any_4_plus_mega
+    )
+    return OptimizedBundle(
+        candidates=selected,
+        marginal_contributions=contributions,
+        optimization_simulations=exact.main_draw_outcome_count,
+        scenario_p_ge_3=exact.p_any_ge_3_mains,
+        scenario_p_ge_4=exact.p_any_ge_4_mains,
+        scenario_p_3_plus_mega=exact.p_any_3_plus_mega,
+        scenario_p_4_plus_mega=exact.p_any_4_plus_mega,
+        scenario_objective=objective,
+        adaptive_metrics=None,
+    )
+
+
 __all__ = [
     "MarginalContribution",
     "ObjectiveWeights",
@@ -626,4 +780,5 @@ __all__ = [
     "OptimizerConstraints",
     "measure_bundle_marginals",
     "optimize_bundle",
+    "optimize_fair_coverage",
 ]

@@ -17,8 +17,19 @@ from .config import AppConfig
 from .constraints import validate_bundle
 from .dates import next_draw_date
 from .exceptions import SimulationStabilityError
+from .fair_odds import (
+    OPTIMAL_30_LINE_3_PLUS_MEGA_COUNT,
+    OPTIMAL_30_LINE_GE3_COUNT,
+    OPTIMAL_30_LINE_GE4_COUNT,
+    exact_coverage_regressions,
+    exact_uniform_metrics,
+    fair_challenger_decision,
+    fair_uniform_model,
+)
 from .models import (
     BundleMetadata,
+    ExactUniformMetrics,
+    FairCoverageChallengerEvidence,
     LockedBundle,
     LockedLine,
     OptimizerSettings,
@@ -26,14 +37,21 @@ from .models import (
     Ticket,
     VerifiedDraw,
 )
+from .objectives import effective_event_weights
 from .optimizer import (
     ObjectiveWeights,
     OptimizerConstraints,
     measure_bundle_marginals,
     optimize_bundle,
+    optimize_fair_coverage,
 )
 from .recenter import PositionalProfile, recenter_bundle
-from .simulation import BundleSimulationMetrics, estimate_bundle_metrics, generate_candidate_pool
+from .simulation import (
+    CANDIDATE_POOL_ALGORITHM_VERSION,
+    BundleSimulationMetrics,
+    estimate_bundle_metrics,
+    generate_candidate_pool,
+)
 from .storage import canonical_json_bytes, sha256_bytes
 
 
@@ -81,25 +99,43 @@ def _objective_from_metrics(
     config: AppConfig,
 ) -> float:
     weights = config.objective
-    if weights.mode == "spike":
-        return (
-            0.35 * weights.p_ge_3_weight * metrics.p_ge_3
-            + max(weights.p_ge_4_weight, 1.0) * metrics.p_ge_4
-            + max(weights.three_plus_mega_weight, 0.25) * metrics.p_3_plus_mega
-            + max(weights.four_plus_weight, 0.5) * metrics.p_4_plus_mega
-            - weights.anti_cannibalization_weight * _anti_cannibalization(tickets)
-        )
+    p_ge_3, p_ge_4, three_plus_mega, four_plus_mega = effective_event_weights(
+        weights.mode,
+        (
+            weights.p_ge_3_weight,
+            weights.p_ge_4_weight,
+            weights.three_plus_mega_weight,
+            weights.four_plus_weight,
+        ),
+    )
     return (
-        weights.p_ge_3_weight * metrics.p_ge_3
-        + weights.p_ge_4_weight * metrics.p_ge_4
-        + weights.three_plus_mega_weight * metrics.p_3_plus_mega
-        + weights.four_plus_weight * metrics.p_4_plus_mega
+        p_ge_3 * metrics.p_ge_3
+        + p_ge_4 * metrics.p_ge_4
+        + three_plus_mega * metrics.p_3_plus_mega
+        + four_plus_mega * metrics.p_4_plus_mega
         - weights.anti_cannibalization_weight * _anti_cannibalization(tickets)
     )
 
 
+def _assert_correction_non_regression(
+    candidate: ExactUniformMetrics,
+    incumbent: ExactUniformMetrics | None,
+) -> None:
+    if incumbent is None:
+        return
+    regressions = exact_coverage_regressions(candidate, incumbent)
+    if regressions:
+        raise ValueError(
+            "correction candidate regresses active incumbent exact coverage: "
+            + ", ".join(regressions)
+        )
+
+
 def _simulation_summary(
-    metrics: BundleSimulationMetrics, *, candidate_pool_size: int
+    metrics: BundleSimulationMetrics,
+    *,
+    candidate_pool_size: int,
+    fair_uniform_exact: ExactUniformMetrics | None = None,
 ) -> SimulationSummary:
     maximum_half_width = max(
         metrics.primary_confidence_half_width,
@@ -119,6 +155,7 @@ def _simulation_summary(
         p_any_4_plus=metrics.p_4_plus_mega,
         p_any_4_plus_mega=metrics.p_4_plus_mega,
         mean_best_main_matches=metrics.mean_best_main_matches,
+        fair_uniform_exact=fair_uniform_exact,
     )
 
 
@@ -135,6 +172,7 @@ def build_locked_bundle(
     supersedes_bundle_id: str | None = None,
     correction_reason: str | None = None,
     apply_recentering: bool = True,
+    incumbent_bundle: LockedBundle | None = None,
 ) -> LockedBundle:
     if not history:
         raise ValueError("verified history is required")
@@ -175,6 +213,7 @@ def build_locked_bundle(
         previous_draw=ordered[-1],
         enforce_production_minimum=True,
     )
+    candidate_pool_sha256 = pool.content_sha256()
     constraints = OptimizerConstraints(
         bundle_size=config.bundle.size,
         tickets_per_tier=config.bundle.aggressive_count,
@@ -201,10 +240,11 @@ def build_locked_bundle(
         mega_repeat_penalty=config.objective.mega_repeat_penalty,
         aggressive_secondary_multiplier=(config.objective.aggressive_secondary_multiplier),
     )
+    model_optimizer_seed = seed ^ 0x9E3779B97F4A7C15
     optimized = optimize_bundle(
         pool,
         model,
-        seed=seed ^ 0x9E3779B97F4A7C15,
+        seed=model_optimizer_seed,
         previous_draw=ordered[-1],
         constraints=constraints,
         weights=weights,
@@ -220,10 +260,120 @@ def build_locked_bundle(
     if optimized.adaptive_metrics is None:
         raise AssertionError("optimizer omitted final adaptive metrics")
 
-    tickets = tuple(candidate.ticket for candidate in optimized.candidates)
-    tiers = tuple(candidate.tier for candidate in optimized.candidates)
+    adaptive_tickets = tuple(candidate.ticket for candidate in optimized.candidates)
+    adaptive_fair = exact_uniform_metrics(adaptive_tickets)
+    incumbent_fair = (
+        exact_uniform_metrics(incumbent_bundle.lines) if incumbent_bundle is not None else None
+    )
+    fair_evidence: FairCoverageChallengerEvidence | None = None
+    fair_selected = False
+    chosen = optimized
     metrics = optimized.adaptive_metrics
-    marginal_contributions = optimized.marginal_contributions
+    if config.fair_coverage.enabled:
+        fair_constraints = OptimizerConstraints(
+            bundle_size=config.bundle.size,
+            tickets_per_tier=config.bundle.aggressive_count,
+            max_main_overlap=config.fair_coverage.max_main_overlap,
+            min_hamming_distance=config.bundle.min_hamming_distance,
+            pair_cap=config.fair_coverage.pair_repeat_cap,
+            triple_cap=config.bundle.triple_repeat_cap,
+            mega_soft_cap=config.fair_coverage.mega_soft_cap,
+            mega_hard_cap=config.fair_coverage.mega_hard_cap,
+        )
+        fair_weights = ObjectiveWeights(
+            mode=config.objective.mode,
+            p_ge_3=config.objective.p_ge_3_weight,
+            p_ge_4=config.objective.p_ge_4_weight,
+            three_plus_mega=config.objective.three_plus_mega_weight,
+            four_plus_mega=config.objective.four_plus_weight,
+            anti_cannibalization=config.fair_coverage.anti_cannibalization_weight,
+            mega_repeat_penalty=config.objective.mega_repeat_penalty,
+            aggressive_secondary_multiplier=(config.objective.aggressive_secondary_multiplier),
+        )
+        fair_optimized = optimize_fair_coverage(
+            pool,
+            fair_uniform_model(model),
+            seed=seed ^ 0xA5A5A5A55A5A5A5A,
+            previous_draw=ordered[-1],
+            constraints=fair_constraints,
+            weights=fair_weights,
+            marginal_simulations=config.simulation.optimization_draws,
+        )
+        fair_tickets = tuple(candidate.ticket for candidate in fair_optimized.candidates)
+        challenger_fair = exact_uniform_metrics(fair_tickets)
+        promotion_decision = fair_challenger_decision(
+            challenger_fair,
+            [adaptive_fair],
+            minimum_relative_improvement=(config.fair_coverage.minimum_relative_improvement),
+            require_30_line_optimum=config.fair_coverage.require_global_optimum,
+            non_regression_references=([incumbent_fair] if incumbent_fair is not None else []),
+        )
+        challenger_model_metrics = estimate_bundle_metrics(
+            fair_tickets,
+            model,
+            seed=model_optimizer_seed ^ 0xD1B54A32D192ED03,
+            min_simulations=config.simulation.initial_draws,
+            max_simulations=config.simulation.maximum_draws,
+            batch_size=config.simulation.batch_draws,
+            confidence_tolerance=config.simulation.confidence_half_width_tolerance,
+            confidence_level=config.simulation.confidence_level,
+            stable_batches_required=config.simulation.stable_batches_required,
+        )
+        fair_selected = promotion_decision.selected
+        if fair_selected:
+            chosen = fair_optimized
+            metrics = challenger_model_metrics
+        model_summary = _simulation_summary(
+            optimized.adaptive_metrics,
+            candidate_pool_size=config.simulation.candidate_pool_size,
+            fair_uniform_exact=adaptive_fair,
+        )
+        challenger_summary = _simulation_summary(
+            challenger_model_metrics,
+            candidate_pool_size=config.simulation.candidate_pool_size,
+            fair_uniform_exact=challenger_fair,
+        )
+        fair_evidence = FairCoverageChallengerEvidence(
+            evidence_version=3,
+            selection_policy=config.fair_coverage.selection_policy,
+            model_skill_status=config.fair_coverage.model_skill_status,
+            selected=fair_selected,
+            global_optimum_certified=(
+                challenger_fair.covered_ge_3_mains_count == OPTIMAL_30_LINE_GE3_COUNT
+                and challenger_fair.covered_ge_4_mains_count == OPTIMAL_30_LINE_GE4_COUNT
+                and challenger_fair.covered_3_plus_mega_count == OPTIMAL_30_LINE_3_PLUS_MEGA_COUNT
+                and challenger_fair.covered_jackpot_count == 30
+            ),
+            selection_reason=(
+                f"{promotion_decision.reason}; selected under explicit fair-null robustness "
+                "because fitted-model predictive skill remains unvalidated"
+                if fair_selected
+                else f"{promotion_decision.reason}; model candidate retained after explicit "
+                "fair-null robustness evaluation"
+            ),
+            minimum_relative_improvement=(config.fair_coverage.minimum_relative_improvement),
+            relative_primary_improvement=promotion_decision.relative_primary_improvement,
+            model_optimized_candidate=adaptive_fair,
+            challenger=challenger_fair,
+            incumbent=incumbent_fair,
+            model_optimized_simulation=model_summary,
+            challenger_model_simulation=challenger_summary,
+            incumbent_model_simulation=(
+                incumbent_bundle.metadata.simulation if incumbent_bundle is not None else None
+            ),
+            relative_challenger_model_p_ge_3_change=(
+                challenger_model_metrics.p_ge_3 / optimized.adaptive_metrics.p_ge_3 - 1.0
+            ),
+            relative_primary_change_vs_incumbent=(
+                challenger_fair.p_any_ge_3_mains / incumbent_fair.p_any_ge_3_mains - 1.0
+                if incumbent_fair is not None
+                else None
+            ),
+        )
+
+    tickets = tuple(candidate.ticket for candidate in chosen.candidates)
+    tiers = tuple(candidate.tier for candidate in chosen.candidates)
+    marginal_contributions = chosen.marginal_contributions
     marginal_basis: Literal["optimizer_selected_candidates", "final_locked_lines"] = (
         "optimizer_selected_candidates"
     )
@@ -233,7 +383,7 @@ def build_locked_bundle(
     recenter_original_objective: float | None = None
     recenter_proposed_objective: float | None = None
     recenter_decision_records: list[dict[str, float | int | bool | str]] = []
-    if apply_recentering:
+    if apply_recentering and not fair_selected:
         screening_seed = seed ^ 0xD1B54A32D192ED03
 
         def objective(candidate_tickets: Sequence[Ticket]) -> float:
@@ -270,8 +420,15 @@ def build_locked_bundle(
         recenter_evaluation_count = config.simulation.recenter_evaluation_draws
         recenter_original_objective = recentered.original_objective
         recenter_proposed_objective = recentered.final_objective
+        fair_original = exact_uniform_metrics(tickets)
+        fair_proposed = exact_uniform_metrics(proposed)
         if proposed != tickets and not aggressive_valid:
             production_gate_reason = "aggressive previous-draw overlap constraint failed"
+        elif (
+            proposed != tickets
+            and fair_proposed.p_any_ge_3_mains + 1e-15 < fair_original.p_any_ge_3_mains
+        ):
+            production_gate_reason = "exact fair 3+ coverage decreased"
         elif proposed != tickets:
             # The screening search is intentionally cheap.  A separate holdout
             # gate re-evaluates the complete original and proposed bundles on
@@ -372,6 +529,21 @@ def build_locked_bundle(
                 }
             )
 
+    selected_constraints = (
+        {
+            "max_main_overlap": config.fair_coverage.max_main_overlap,
+            "pair_repeat_cap": config.fair_coverage.pair_repeat_cap,
+            "mega_soft_cap": config.fair_coverage.mega_soft_cap,
+            "mega_hard_cap": config.fair_coverage.mega_hard_cap,
+        }
+        if fair_selected
+        else {
+            "max_main_overlap": config.bundle.max_main_overlap,
+            "pair_repeat_cap": config.bundle.pair_repeat_cap,
+            "mega_soft_cap": config.bundle.mega_soft_cap,
+            "mega_hard_cap": config.bundle.mega_hard_cap,
+        }
+    )
     lines: list[LockedLine] = []
     tier_line_ids: Counter[str] = Counter()
     for ticket, tier in zip(tickets, tiers, strict=True):
@@ -386,11 +558,11 @@ def build_locked_bundle(
         )
     validate_bundle(
         lines,
-        max_overlap=config.bundle.max_main_overlap,
+        max_overlap=selected_constraints["max_main_overlap"],
         min_hamming=config.bundle.min_hamming_distance,
-        pair_cap=config.bundle.pair_repeat_cap,
+        pair_cap=selected_constraints["pair_repeat_cap"],
         triple_cap=config.bundle.triple_repeat_cap,
-        mega_hard_cap=config.bundle.mega_hard_cap,
+        mega_hard_cap=selected_constraints["mega_hard_cap"],
         expected_size=config.bundle.size,
         previous_draw_mains=ordered[-1].mains,
         aggressive_previous_overlap_cap=config.bundle.aggressive_previous_draw_overlap_cap,
@@ -402,8 +574,17 @@ def build_locked_bundle(
             f"after {metrics.simulation_count:,} simulations"
         )
 
+    final_fair_metrics = exact_uniform_metrics(tickets)
+    _assert_correction_non_regression(final_fair_metrics, incumbent_fair)
     optimizer_settings = OptimizerSettings(
-        algorithm="simulation-greedy-submodular-v2",
+        algorithm=(
+            "exact-fair-linear-packing-v4"
+            if fair_selected
+            else "simulation-greedy-submodular-v4-fair-robustness-evaluated"
+        ),
+        optimization_basis=(
+            "exact_fair_uniform_coverage" if fair_selected else "adaptive_model_simulation"
+        ),
         objective_mode=config.objective.mode,
         objective_weights={
             "p_ge_3": config.objective.p_ge_3_weight,
@@ -414,12 +595,12 @@ def build_locked_bundle(
             "aggressive_secondary_multiplier": (config.objective.aggressive_secondary_multiplier),
         },
         constraints={
-            "max_main_overlap": config.bundle.max_main_overlap,
+            "max_main_overlap": selected_constraints["max_main_overlap"],
             "min_hamming_distance": config.bundle.min_hamming_distance,
-            "pair_repeat_cap": config.bundle.pair_repeat_cap,
+            "pair_repeat_cap": selected_constraints["pair_repeat_cap"],
             "triple_repeat_cap": config.bundle.triple_repeat_cap,
-            "mega_soft_cap": config.bundle.mega_soft_cap,
-            "mega_hard_cap": config.bundle.mega_hard_cap,
+            "mega_soft_cap": selected_constraints["mega_soft_cap"],
+            "mega_hard_cap": selected_constraints["mega_hard_cap"],
             "aggressive_previous_draw_overlap_cap": (
                 config.bundle.aggressive_previous_draw_overlap_cap
             ),
@@ -428,8 +609,12 @@ def build_locked_bundle(
             "band_rule": config.bundle.band_rule,
             "recentering_accepted": recenter_accepted,
         },
-        anti_cannibalization_weight=config.objective.anti_cannibalization_weight,
-        optimization_simulation_count=optimized.optimization_simulations,
+        anti_cannibalization_weight=(
+            config.fair_coverage.anti_cannibalization_weight
+            if fair_selected
+            else config.objective.anti_cannibalization_weight
+        ),
+        optimization_simulation_count=chosen.optimization_simulations,
         local_search_iterations=recenter_accepted,
         recenter_evaluation_seed=recenter_evaluation_seed,
         recenter_evaluation_simulations=recenter_evaluation_count,
@@ -452,6 +637,7 @@ def build_locked_bundle(
             }
             for item in marginal_contributions
         ),
+        fair_coverage_challenger=fair_evidence,
     )
     identity = {
         "history_snapshot_sha256": history_snapshot_sha256,
@@ -461,6 +647,10 @@ def build_locked_bundle(
         "runtime_environment": _runtime_environment(),
         "configuration_sha256": config.snapshot_sha256(),
         "seed": seed,
+        "candidate_pool_sha256": candidate_pool_sha256,
+        "fair_coverage_challenger": (
+            fair_evidence.model_dump(mode="json") if fair_evidence is not None else None
+        ),
         "lock_version": lock_version,
         "supersedes_bundle_id": supersedes_bundle_id,
         "correction_reason": correction_reason,
@@ -479,6 +669,8 @@ def build_locked_bundle(
         configuration_snapshot=config.snapshot(),
         configuration_sha256=config.snapshot_sha256(),
         random_seed=seed,
+        candidate_pool_sha256=candidate_pool_sha256,
+        candidate_pool_algorithm_version=CANDIDATE_POOL_ALGORITHM_VERSION,
         source_verification_metadata=ordered[-1].verification,
         history_cutoff_date=cutoff,
         history_snapshot_sha256=history_snapshot_sha256,
@@ -486,7 +678,9 @@ def build_locked_bundle(
         calibration_random_seed=calibration.selection_random_seed,
         selected_hyperparameters=calibration.bundle_hyperparameters(),
         simulation=_simulation_summary(
-            metrics, candidate_pool_size=config.simulation.candidate_pool_size
+            metrics,
+            candidate_pool_size=config.simulation.candidate_pool_size,
+            fair_uniform_exact=final_fair_metrics,
         ),
         optimizer=optimizer_settings,
         bundle_size=config.bundle.size,

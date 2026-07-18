@@ -10,6 +10,7 @@ import pytest
 
 from slp_model.calibration import CalibrationArtifact, CalibrationStore
 from slp_model.exceptions import ImmutableArtifactError, IntegrityError, SourceMismatchError
+from slp_model.fair_odds import exact_uniform_metrics
 from slp_model.models import (
     BundleMetadata,
     LockedBundle,
@@ -18,6 +19,7 @@ from slp_model.models import (
     SelectedHyperparameters,
     SimulationSummary,
     SourceEvidence,
+    Ticket,
     VerificationMetadata,
     VerifiedDraw,
 )
@@ -114,7 +116,13 @@ def bundle(*, bundle_id: str = "bundle-test-v1", version: int = 1, supersedes: s
         optimizer=OptimizerSettings(
             algorithm="test-greedy",
             objective_weights={"p_ge_3": 1.0},
-            constraints={"overlap": 3},
+            constraints={
+                "max_main_overlap": 3,
+                "min_hamming_distance": 2,
+                "pair_repeat_cap": 2,
+                "triple_repeat_cap": 1,
+                "mega_hard_cap": 5,
+            },
             anti_cannibalization_weight=0.1,
         ),
         bundle_size=3,
@@ -476,6 +484,7 @@ def test_calibration_index_is_portable_and_orphans_fail_audit(tmp_path: Path) ->
     artifact = calibration_artifact()
     path = store.lock(artifact)
     assert store.latest() == artifact
+    assert store.find(artifact.calibration_id) == artifact
     assert artifact.selection_random_seed == 0
     assert not Path(store.index.read()[0]["payload"]["artifact_path"]).is_absolute()
 
@@ -483,3 +492,38 @@ def test_calibration_index_is_portable_and_orphans_fail_audit(tmp_path: Path) ->
     orphan.write_bytes(path.read_bytes())
     with pytest.raises(IntegrityError, match="orphan calibration"):
         store.audit_integrity()
+
+
+def test_calibration_lock_is_idempotent_for_lifecycle_only_replay(tmp_path: Path) -> None:
+    root = tmp_path / "calibration"
+    audit = AppendOnlyLog(tmp_path / "audit" / "events.jsonl")
+    store = CalibrationStore(root, audit)
+    artifact = calibration_artifact()
+    path = store.lock(artifact)
+    replay = artifact.model_copy(
+        update={
+            "created_timestamp_utc": datetime(2026, 1, 3, tzinfo=UTC),
+            "hyperparameter_selection_timestamp_utc": datetime(2026, 1, 3, tzinfo=UTC),
+            "reasons": ("operator_forced",),
+            "parent_calibration_id": artifact.calibration_id,
+        }
+    )
+
+    assert store.lock(replay) == path
+    assert store.latest() == artifact
+    assert len(store.index.read()) == 1
+
+
+def test_bundle_store_recomputes_exact_fair_claims(tmp_path: Path, before_draw_clock: None) -> None:
+    audit = AppendOnlyLog(tmp_path / "audit" / "events.jsonl")
+    store = BundleStore(tmp_path / "predictions", audit)
+    original = bundle()
+    wrong_exact = exact_uniform_metrics([Ticket(mains=(1, 2, 3, 4, 5), mega=1)])
+    altered_simulation = original.metadata.simulation.model_copy(
+        update={"fair_uniform_exact": wrong_exact}
+    )
+    altered_metadata = original.metadata.model_copy(update={"simulation": altered_simulation})
+    altered = original.model_copy(update={"metadata": altered_metadata})
+
+    with pytest.raises(IntegrityError, match="do not match bundle lines"):
+        store.lock(altered, previous_draw_mains=(1, 2, 3, 4, 5))

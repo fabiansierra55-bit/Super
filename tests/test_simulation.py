@@ -65,6 +65,8 @@ def test_candidate_pool_is_unique_valid_and_deterministic() -> None:
         candidate.signature for candidate in second
     ]
     assert len({candidate.signature for candidate in first}) == 900
+    assert first.content_sha256() == second.content_sha256()
+    assert len(first.content_sha256()) == 64
     assert first.tier_counts == {
         "aggressive": 300,
         "balanced": 300,

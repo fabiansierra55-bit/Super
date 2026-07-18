@@ -35,6 +35,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("status", help="show local workflow state without network access")
 
+    show_bundle = subparsers.add_parser(
+        "show-bundle", help="show the active or requested immutable ticket bundle"
+    )
+    show_bundle.add_argument("--bundle-id")
+
+    odds = subparsers.add_parser(
+        "odds", help="calculate exact fair-uniform coverage for a locked bundle"
+    )
+    odds.add_argument("--bundle-id")
+
     rebuild = subparsers.add_parser(
         "rebuild-history", help="fetch and lock a two-source-verified history snapshot"
     )
@@ -93,7 +103,12 @@ def build_parser() -> argparse.ArgumentParser:
         "backtest", help="run a no-future-information walk-forward diagnostic"
     )
     backtest.add_argument("--evaluations", type=int, default=3)
-    backtest.add_argument("--candidate-pool-size", type=int, default=6_000)
+    backtest.add_argument(
+        "--candidate-pool-size",
+        type=int,
+        default=50_000,
+        help="candidate count per fold (50,000 preserves the production selection path)",
+    )
 
     subparsers.add_parser("report", help="write immutable JSON and Markdown score reports")
     return parser
@@ -122,6 +137,10 @@ def run(args: argparse.Namespace) -> object:
     app = Application.create(project_root=args.project_root, config_path=args.config)
     if args.command == "status":
         return app.status()
+    if args.command == "show-bundle":
+        return app.bundle_view(args.bundle_id)
+    if args.command == "odds":
+        return app.bundle_odds(args.bundle_id)
     if args.command == "rebuild-history":
         path = app.rebuild_history(minimum_draws=args.minimum_draws)
         history = app.history_store.load_latest()

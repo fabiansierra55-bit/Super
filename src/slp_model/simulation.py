@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections import Counter
 from collections.abc import Iterator, Sequence
@@ -14,6 +15,9 @@ from numpy.typing import NDArray
 
 from .modeling import FittedModel, TierName
 from .models import Draw, Ticket
+
+CANDIDATE_POOL_ALGORITHM_VERSION = "deterministic-tiered-weighted-sampling-v1"
+CANDIDATE_POOL_DIGEST_VERSION = "candidate-pool-v1"
 
 PRODUCTION_MINIMUM_CANDIDATES = 50_000
 TIERS: tuple[TierName, ...] = ("aggressive", "balanced", "conservative")
@@ -55,6 +59,22 @@ class CandidatePool(Sequence[Candidate]):
     @property
     def tier_counts(self) -> dict[str, int]:
         return dict(Counter(candidate.tier for candidate in self.candidates))
+
+    def content_sha256(self) -> str:
+        """Bind the complete ordered pool without persisting 50,000 CSV rows."""
+
+        digest = hashlib.sha256()
+        digest.update(
+            f"{CANDIDATE_POOL_DIGEST_VERSION}|{self.seed}|{self.requested_size}\n".encode()
+        )
+        for candidate in self.candidates:
+            record = (
+                f"{candidate.generation_index}|{candidate.tier}|"
+                f"{','.join(map(str, candidate.ticket.mains))}|{candidate.ticket.mega}|"
+                f"{candidate.sampling_log_weight.hex()}\n"
+            )
+            digest.update(record.encode())
+        return digest.hexdigest()
 
 
 @dataclass(frozen=True)

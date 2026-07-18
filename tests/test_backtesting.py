@@ -78,6 +78,21 @@ def test_backtest_prediction_is_invariant_to_target_numbers() -> None:
         "training_prefix_sha256",
         "random_seed",
         "parameters",
+        "selection_basis",
+        "fair_coverage_challenger",
         "predicted",
     ):
         assert original[key] == changed_target[key]
+    for candidate in ("model_candidate", "fair_challenger"):
+        original_candidate = original["champion_challenger_comparison"][candidate]
+        changed_candidate = changed_target["champion_challenger_comparison"][candidate]
+        assert (original_candidate is None) == (changed_candidate is None)
+        if original_candidate is not None and changed_candidate is not None:
+            assert (
+                original_candidate["predicted_p_any_ge_3_mains"]
+                == changed_candidate["predicted_p_any_ge_3_mains"]
+            )
+            assert (
+                original_candidate["predicted_p_any_ge_4_mains"]
+                == changed_candidate["predicted_p_any_ge_4_mains"]
+            )

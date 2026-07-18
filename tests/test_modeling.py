@@ -138,7 +138,7 @@ def test_complete_ticket_outcome_uses_primary_and_mega_secondary_events() -> Non
     assert outcome.any_four_plus
     assert outcome.any_three_plus_mega
     assert not outcome.any_four_plus_mega
-    assert outcome.objective == pytest.approx(1.2026)
+    assert outcome.objective == pytest.approx(1.2526)
 
     # A Mega hit by itself is not the primary bundle objective.
     mega_only = _complete_bundle_outcome(
