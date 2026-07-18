@@ -242,7 +242,7 @@ class SimulationSummary(FrozenModel):
 
 
 class FairCoverageChallengerEvidence(FrozenModel):
-    evidence_version: Literal[1, 2, 3] = 1
+    evidence_version: Literal[1, 2, 3, 4] = 1
     selection_policy: Literal[
         "legacy_exact_fair_gate",
         "fair_null_robustness_over_unvalidated_model_v1",
@@ -250,6 +250,7 @@ class FairCoverageChallengerEvidence(FrozenModel):
     model_skill_status: Literal["unvalidated", "validated"] = "unvalidated"
     selected: bool
     global_optimum_certified: bool = False
+    certificate_bundle_size: int | None = Field(default=None, ge=1)
     selection_reason: str = Field(min_length=1)
     minimum_relative_improvement: float = Field(ge=0)
     relative_primary_improvement: float
@@ -264,11 +265,36 @@ class FairCoverageChallengerEvidence(FrozenModel):
 
     @model_validator(mode="after")
     def validate_promotion_evidence(self) -> FairCoverageChallengerEvidence:
+        if self.evidence_version >= 4:
+            if self.certificate_bundle_size is None:
+                raise ValueError("version 4 evidence requires certificate_bundle_size")
+            certificate_bundle_size = self.certificate_bundle_size
+            if certificate_bundle_size != self.challenger.covered_jackpot_count:
+                raise ValueError("certificate bundle size does not match challenger tickets")
+        else:
+            # Evidence versions 1-3 encoded the original 30-line certificate
+            # implicitly. Preserve those immutable artifact semantics.
+            if self.certificate_bundle_size is not None:
+                raise ValueError(
+                    "evidence versions before 4 cannot declare certificate_bundle_size"
+                )
+            certificate_bundle_size = 30
+
+        # Imported lazily because fair_odds depends on these domain models.
+        from .fair_odds import fair_coverage_certificate
+
+        expected_certificate = fair_coverage_certificate(certificate_bundle_size)
         certificate = (
-            self.challenger.covered_ge_3_mains_count == 258_582
-            and self.challenger.covered_ge_4_mains_count == 6_330
-            and self.challenger.covered_3_plus_mega_count == 264_630
-            and self.challenger.covered_jackpot_count == 30
+            self.challenger.covered_ge_3_mains_count
+            == expected_certificate.covered_ge_3_mains_count
+            and self.challenger.covered_ge_4_mains_count
+            == expected_certificate.covered_ge_4_mains_count
+            and self.challenger.covered_3_plus_mega_count
+            == expected_certificate.covered_3_plus_mega_count
+            and self.challenger.covered_4_plus_mega_count
+            == expected_certificate.covered_4_plus_mega_count
+            and self.challenger.covered_5_mains_count == expected_certificate.bundle_size
+            and self.challenger.covered_jackpot_count == expected_certificate.covered_jackpot_count
         )
         if self.global_optimum_certified != certificate:
             raise ValueError("fair global-certificate flag does not match exact metrics")
@@ -439,6 +465,12 @@ class BundleMetadata(FrozenModel):
             raise ValueError("a corrected bundle requires a parent ID and correction reason")
         evidence = self.optimizer.fair_coverage_challenger
         if (
+            evidence is not None
+            and evidence.evidence_version >= 4
+            and evidence.certificate_bundle_size != self.bundle_size
+        ):
+            raise ValueError("fair certificate bundle size does not match locked bundle size")
+        if (
             self.lock_version > 1
             and evidence is not None
             and evidence.evidence_version >= 2
@@ -553,6 +585,11 @@ class BundleScore(FrozenModel):
     intended_draw_date: date
     draw: VerifiedDraw
     lines: tuple[ScoredLine, ...]
+    # These provenance fields were added after the first immutable score schema.
+    # ``None``/``unknown`` therefore remain valid when loading legacy artifacts;
+    # new scoring always persists concrete values from the locked bundle.
+    bundle_size: int | None = Field(default=None, ge=1)
+    model_version: str = Field(default="unknown", min_length=1)
     overall: ScoreStatistics
     tiers: dict[Strategy, ScoreStatistics]
     best_line_keys: tuple[str, ...]
@@ -566,4 +603,6 @@ class BundleScore(FrozenModel):
     def identity_matches(self) -> BundleScore:
         if self.draw.draw_date != self.intended_draw_date:
             raise ValueError("score draw date does not match bundle intended draw date")
+        if self.bundle_size is not None and self.bundle_size != len(self.lines):
+            raise ValueError("score bundle_size does not match scored line count")
         return self

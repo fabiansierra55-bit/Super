@@ -23,15 +23,49 @@ from .scoring import score_ticket
 from .simulation import estimate_bundle_metrics, generate_candidate_pool
 from .storage import canonical_json_bytes, sha256_bytes, write_new_file
 
+BACKTEST_PREFIX_ALGORITHM_VERSION = "cutoff-draw-facts-v1"
+BACKTEST_SEED_ALGORITHM_VERSION = "prefix-draw-facts-target-model-v3"
+
 
 def _prefix_sha256(prefix: Sequence[VerifiedDraw]) -> str:
-    return sha256_bytes(canonical_json_bytes([draw.model_dump(mode="json") for draw in prefix]))
+    """Hash only draw facts that were knowable by the fold cutoff.
+
+    Verification provenance is deliberately excluded. Archive response hashes
+    and fetch timestamps can be produced after a held-out target and can commit
+    the seed to future response content even when model fitting receives only a
+    historical draw prefix.
+    """
+
+    draw_facts = [
+        {
+            "draw_date": draw.draw_date.isoformat(),
+            "draw_id": draw.draw_id,
+            "mains": list(draw.mains),
+            "mega": draw.mega,
+        }
+        for draw in prefix
+    ]
+    return sha256_bytes(
+        canonical_json_bytes(
+            {
+                "algorithm": BACKTEST_PREFIX_ALGORITHM_VERSION,
+                "draws": draw_facts,
+            }
+        )
+    )
 
 
-def _seed(prefix_sha256: str, target: date, offset: int) -> int:
+def _seed(prefix_sha256: str, target: date, model_version: str) -> int:
+    """Derive a fold-identity-stable seed without evaluation-list position."""
+
     digest = sha256_bytes(
         canonical_json_bytes(
-            {"training_prefix": prefix_sha256, "target": target.isoformat(), "offset": offset}
+            {
+                "algorithm": BACKTEST_SEED_ALGORITHM_VERSION,
+                "training_prefix": prefix_sha256,
+                "target": target.isoformat(),
+                "model_version": model_version,
+            }
         )
     )
     return int(digest[:16], 16)
@@ -86,11 +120,11 @@ def run_backtest(
     )
     records: list[dict[str, Any]] = []
     start = len(ordered) - evaluations
-    for offset, target_index in enumerate(range(start, len(ordered))):
+    for target_index in range(start, len(ordered)):
         prefix = ordered[:target_index]
         target = ordered[target_index]
         prefix_sha256 = _prefix_sha256(prefix)
-        seed = _seed(prefix_sha256, target.draw_date, offset)
+        seed = _seed(prefix_sha256, target.draw_date, config.model_version)
         selection = select_hyperparameters(
             prefix,
             cutoff_date=prefix[-1].draw_date,
@@ -187,7 +221,9 @@ def run_backtest(
                     minimum_relative_improvement=(
                         config.fair_coverage.minimum_relative_improvement
                     ),
-                    require_30_line_optimum=config.fair_coverage.require_global_optimum,
+                    require_line_optimum=(
+                        config.bundle.size if config.fair_coverage.require_global_optimum else None
+                    ),
                 )
                 fair_record.update(
                     {
@@ -259,6 +295,10 @@ def run_backtest(
                     cutoff.isoformat() for cutoff in selection.fold_training_cutoffs
                 ],
                 "random_seed": seed,
+                "training_prefix_algorithm_version": BACKTEST_PREFIX_ALGORITHM_VERSION,
+                "seed_algorithm_version": BACKTEST_SEED_ALGORITHM_VERSION,
+                "bundle_size": config.bundle.size,
+                "tier_quota": config.bundle.aggressive_count,
                 "parameters": {
                     "mains": {
                         "window": parameters.mains.window,
@@ -332,11 +372,21 @@ def run_backtest(
         if (comparison := record["champion_challenger_comparison"])["fair_challenger"] is not None
     ]
     report = {
-        "schema_version": 2,
+        "schema_version": 4,
         "report_type": "cutoff_safe_walk_forward_production_selection_backtest",
         "history_snapshot_sha256": history_snapshot_sha256,
         "history_cutoff_date": ordered[-1].draw_date.isoformat(),
         "evaluation_count": len(records),
+        "model_version": config.model_version,
+        "backtest_prefix_algorithm_version": BACKTEST_PREFIX_ALGORITHM_VERSION,
+        "backtest_seed_algorithm_version": BACKTEST_SEED_ALGORITHM_VERSION,
+        "history_snapshot_used_for_seed": False,
+        "bundle_size": config.bundle.size,
+        "tier_counts": {
+            "aggressive": config.bundle.aggressive_count,
+            "balanced": config.bundle.balanced_count,
+            "conservative": config.bundle.conservative_count,
+        },
         "production_candidate_minimum": config.simulation.candidate_pool_size,
         "diagnostic_candidate_pool_size": diagnostic_candidate_pool_size,
         "production_selection_path_exercised": True,
@@ -385,8 +435,12 @@ def _markdown(report: dict[str, Any]) -> str:
         report["disclaimer"],
         "",
         f"Evaluations: {report['evaluation_count']}",
+        f"Bundle size: {report['bundle_size']} ({report['tier_counts']})",
         f"History cutoff: {report['history_cutoff_date']}",
         f"No future information: {report['no_future_information']}",
+        f"Training prefix contract: {report['backtest_prefix_algorithm_version']}",
+        f"Seed contract: {report['backtest_seed_algorithm_version']}",
+        f"Full history snapshot used for seed: {report['history_snapshot_used_for_seed']}",
         f"Diagnostic candidate pool: {report['diagnostic_candidate_pool_size']} "
         f"(production minimum: {report['production_candidate_minimum']})",
         f"Production selection path exercised: {report['production_selection_path_exercised']}",

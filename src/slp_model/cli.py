@@ -168,6 +168,11 @@ def run(args: argparse.Namespace) -> object:
             "status": "locked",
             "bundle_id": bundle.metadata.bundle_id,
             "intended_draw_date": bundle.metadata.intended_draw_date.isoformat(),
+            "bundle_size": bundle.metadata.bundle_size,
+            "tier_counts": {
+                tier: sum(line.strategy == tier for line in bundle.lines)
+                for tier in ("aggressive", "balanced", "conservative")
+            },
             "random_seed": bundle.metadata.random_seed,
             "candidate_pool_size": bundle.metadata.simulation.candidate_pool_size,
             "simulation_count": bundle.metadata.simulation.simulation_count,

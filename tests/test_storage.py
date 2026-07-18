@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -270,6 +271,29 @@ def test_scoring_artifact_is_idempotent_and_tamper_evident(tmp_path: Path, befor
         bundle_store.find("bundle-test-v1")
 
 
+def test_audit_cross_binds_score_model_regime_to_locked_bundle(
+    tmp_path: Path, before_draw_clock: None
+) -> None:
+    audit, history, bundle_store, score_store = stores(tmp_path)
+    locked = bundle()
+    bundle_store.lock(locked, previous_draw_mains=(30, 31, 32, 33, 34))
+    result = verified_draw(draw_date=date(2026, 1, 3), mains=(1, 2, 3, 40, 41), mega=1)
+    score = score_locked_bundle(
+        locked,
+        result,
+        scored_timestamp_utc=datetime(2026, 1, 4, tzinfo=UTC),
+    ).model_copy(update={"model_version": "forged-model-regime"})
+    score_store.append(score)
+
+    with pytest.raises(IntegrityError, match="model-version provenance"):
+        audit_all_stores(
+            audit_log=audit,
+            history=history,
+            bundles=bundle_store,
+            scores=score_store,
+        )
+
+
 def test_wall_clock_prevents_a_new_after_draw_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -300,6 +324,38 @@ def test_index_bound_manifest_detects_csv_and_manifest_rewrite(
 
     with pytest.raises(IntegrityError, match="manifest is not bound"):
         bundle_store.find(locked.metadata.bundle_id)
+
+
+def test_version_four_snapshot_claims_are_semantically_bound() -> None:
+    path = Path("data/predictions/locked/2026-07-18/slp-2026-07-18-v5-ca0077ce15c2753f/bundle.json")
+    locked = LockedBundle.model_validate(json.loads(path.read_text(encoding="utf-8"))["bundle"])
+    evidence = locked.metadata.optimizer.fair_coverage_challenger
+    assert evidence is not None
+    evidence_payload = evidence.model_dump(mode="json")
+    evidence_payload.update({"evidence_version": 4, "certificate_bundle_size": 30})
+    version_four = evidence.__class__.model_validate(evidence_payload)
+    optimizer = locked.metadata.optimizer.model_copy(
+        update={"fair_coverage_challenger": version_four}
+    )
+    snapshot = json.loads(json.dumps(locked.metadata.configuration_snapshot))
+    snapshot["bundle"]["size"] = 60
+    snapshot_bytes = json.dumps(
+        snapshot,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    metadata = locked.metadata.model_copy(
+        update={
+            "configuration_snapshot": snapshot,
+            "configuration_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
+            "optimizer": optimizer,
+        }
+    )
+    tampered = locked.model_copy(update={"metadata": metadata})
+
+    with pytest.raises(IntegrityError, match="configuration claims"):
+        BundleStore._validate_semantic_claims(tampered)
 
 
 def test_score_index_is_authoritative_and_binds_csv_manifest(
@@ -374,6 +430,27 @@ def test_bundle_index_directory_bijection_rejects_orphan_and_mislocation(
             bundles=bundle_store,
             scores=score_store,
         )
+
+
+def test_container_ds_store_does_not_block_audit_but_artifact_sidecar_does(
+    tmp_path: Path, before_draw_clock: None
+) -> None:
+    audit, history, bundle_store, score_store = stores(tmp_path)
+    directory = bundle_store.lock(bundle(), previous_draw_mains=(30, 31, 32, 33, 34))
+    (bundle_store.locked_root / ".DS_Store").write_bytes(b"finder metadata")
+    (directory.parent / ".DS_Store").write_bytes(b"finder metadata")
+
+    summary = audit_all_stores(
+        audit_log=audit,
+        history=history,
+        bundles=bundle_store,
+        scores=score_store,
+    )
+    assert summary["prediction_container_metadata_sidecars"] == 2
+
+    (directory / ".DS_Store").write_bytes(b"not allowed inside immutable artifact")
+    with pytest.raises(IntegrityError, match="manifest file sets differ"):
+        bundle_store.audit_integrity()
 
 
 def test_audit_requires_authoritative_events_in_global_audit(

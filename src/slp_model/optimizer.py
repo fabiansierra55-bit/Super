@@ -18,7 +18,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .constraints import validate_bundle
-from .fair_odds import exact_uniform_metrics
+from .fair_odds import (
+    exact_uniform_metrics,
+    fair_coverage_certificate,
+    matches_fair_coverage_certificate,
+)
 from .modeling import FittedModel, TierName
 from .models import Draw, Ticket
 from .objectives import effective_event_weights
@@ -63,6 +67,8 @@ class OptimizerConstraints:
             raise ValueError("pair and triple caps must be positive")
         if self.mega_soft_cap <= 0 or self.mega_hard_cap < self.mega_soft_cap:
             raise ValueError("invalid Mega soft/hard caps")
+        if self.bundle_size > 27 * self.mega_hard_cap:
+            raise ValueError("Mega hard cap cannot support the requested bundle size")
 
 
 @dataclass(frozen=True)
@@ -385,7 +391,7 @@ def optimize_bundle(
     metric_confidence_level: float = 0.95,
     metric_stable_batches_required: int = 2,
 ) -> OptimizedBundle:
-    """Select a constrained 30-line bundle by global marginal contribution."""
+    """Select a constrained bundle by global marginal contribution."""
 
     candidates = tuple(candidate_pool)
     if len(candidates) < constraints.bundle_size:
@@ -419,6 +425,10 @@ def optimize_bundle(
             [len(set(int(value) for value in row) & prior) for row in mains]
         )
         permanently_compatible &= ~aggressive | (overlaps_prior <= 1)
+    for tier in _TIER_ORDER:
+        eligible_tier_count = int(np.count_nonzero(permanently_compatible & (tiers == tier)))
+        if eligible_tier_count < constraints.tickets_per_tier:
+            raise OptimizationError(f"candidate pool lacks enough prior-compatible {tier} tickets")
 
     main_counts = np.zeros(48, dtype=np.int16)
     pair_counts = np.zeros(48 * 48, dtype=np.int16)
@@ -614,6 +624,398 @@ def optimize_bundle(
     )
 
 
+def _fair_packing_state(
+    selected_indices: Sequence[int],
+    mains: NDArray[np.int16],
+    mega: NDArray[np.int16],
+    pair_ids: NDArray[np.int32],
+    tiers: NDArray[np.str_],
+) -> tuple[
+    NDArray[np.bool_],
+    NDArray[np.int16],
+    NDArray[np.int16],
+    NDArray[np.int16],
+    NDArray[np.int16],
+    Counter[str],
+]:
+    """Rebuild the compact mutable state for a linear-packing selection."""
+
+    selected_mask = np.zeros(len(mains), dtype=bool)
+    main_counts = np.zeros(48, dtype=np.int16)
+    pair_counts = np.zeros(48 * 48, dtype=np.int16)
+    mega_counts = np.zeros(28, dtype=np.int16)
+    mega_main_counts = np.zeros((28, 48), dtype=np.int16)
+    tier_counts: Counter[str] = Counter()
+    for index in selected_indices:
+        selected_mask[index] = True
+        main_counts[mains[index]] += 1
+        pair_counts[pair_ids[index]] += 1
+        mega_counts[mega[index]] += 1
+        mega_main_counts[mega[index], mains[index]] += 1
+        tier_counts[str(tiers[index])] += 1
+    return (
+        selected_mask,
+        main_counts,
+        pair_counts,
+        mega_counts,
+        mega_main_counts,
+        tier_counts,
+    )
+
+
+def _main_degree_collision_cost(main_counts: NDArray[np.int16]) -> int:
+    """Count line pairs intersecting at one main in a linear packing."""
+
+    return sum(int(value) * (int(value) - 1) // 2 for value in main_counts[1:])
+
+
+def _extend_fair_packing(
+    selected_indices: Sequence[int],
+    *,
+    mains: NDArray[np.int16],
+    mega: NDArray[np.int16],
+    pair_ids: NDArray[np.int32],
+    tiers: NDArray[np.str_],
+    permanently_compatible: NDArray[np.bool_],
+    constraints: OptimizerConstraints,
+    degree_ceiling: int,
+    rng: np.random.Generator,
+) -> tuple[int, ...]:
+    """Stochastically complete a partial packing using a deterministic RNG."""
+
+    selected = list(selected_indices)
+    (
+        selected_mask,
+        main_counts,
+        pair_counts,
+        mega_counts,
+        mega_main_counts,
+        tier_counts,
+    ) = _fair_packing_state(selected, mains, mega, pair_ids, tiers)
+    noise_scale = float(rng.choice(np.asarray((20.0, 50.0, 100.0, 200.0, 500.0))))
+    requested_top_k = int(rng.choice(np.asarray((1, 5, 20, 50, 100))))
+
+    while len(selected) < constraints.bundle_size:
+        base_eligible = (
+            ~selected_mask
+            & permanently_compatible
+            & (mega_counts[mega] < constraints.mega_hard_cap)
+        )
+        base_eligible &= np.all(pair_counts[pair_ids] == 0, axis=1)
+        base_eligible &= np.all(main_counts[mains] < degree_ceiling, axis=1)
+        base_eligible &= np.all(mega_main_counts[mega[:, None], mains] == 0, axis=1)
+
+        tier_options: list[tuple[int, int, TierName, NDArray[np.int64]]] = []
+        for tier_position, tier in enumerate(_TIER_ORDER):
+            if tier_counts[tier] >= constraints.tickets_per_tier:
+                continue
+            indices = np.flatnonzero(base_eligible & (tiers == tier))
+            tier_options.append((len(indices), tier_position, tier, indices))
+        if not tier_options:
+            break
+        _, _, requested_tier, eligible_indices = min(tier_options, key=lambda item: item[:2])
+        if eligible_indices.size == 0:
+            break
+
+        candidate_mains = mains[eligible_indices]
+        incremental_reuse = main_counts[candidate_mains].sum(axis=1)
+        post_square_cost = np.square(main_counts[candidate_mains] + 1).sum(axis=1)
+        mega_reuse = mega_counts[mega[eligible_indices]]
+        scores = (
+            1_000.0 * incremental_reuse
+            + 10.0 * post_square_cost
+            + mega_reuse
+            + rng.gumbel(size=eligible_indices.size) * noise_scale
+        )
+        top_k = min(requested_top_k, eligible_indices.size)
+        top = np.argpartition(scores, top_k - 1)[:top_k]
+        chosen_index = int(eligible_indices[int(top[int(rng.integers(top_k))])])
+
+        selected.append(chosen_index)
+        selected_mask[chosen_index] = True
+        main_counts[mains[chosen_index]] += 1
+        pair_counts[pair_ids[chosen_index]] += 1
+        mega_counts[mega[chosen_index]] += 1
+        mega_main_counts[mega[chosen_index], mains[chosen_index]] += 1
+        tier_counts[requested_tier] += 1
+    return tuple(selected)
+
+
+def _balance_complete_fair_packing(
+    selected_indices: Sequence[int],
+    *,
+    mains: NDArray[np.int16],
+    mega: NDArray[np.int16],
+    pair_ids: NDArray[np.int32],
+    tiers: NDArray[np.str_],
+    permanently_compatible: NDArray[np.bool_],
+    constraints: OptimizerConstraints,
+    degree_ceiling: int,
+    target_collision_cost: int,
+    rng: np.random.Generator,
+) -> tuple[int, ...] | None:
+    """Reach the balanced degree certificate with exact one/two exchanges."""
+
+    selected = list(selected_indices)
+    if len(selected) != constraints.bundle_size:
+        return None
+
+    # Monotone one-line exchanges cheaply remove most degree imbalance.
+    while True:
+        (
+            selected_mask,
+            main_counts,
+            pair_counts,
+            mega_counts,
+            mega_main_counts,
+            _,
+        ) = _fair_packing_state(selected, mains, mega, pair_ids, tiers)
+        base_cost = _main_degree_collision_cost(main_counts)
+        if base_cost == target_collision_cost:
+            return tuple(selected)
+        best: tuple[int, int, int] | None = None
+        for position, old_index in enumerate(selected):
+            after_mains = main_counts.copy()
+            after_mains[mains[old_index]] -= 1
+            after_pairs = pair_counts.copy()
+            after_pairs[pair_ids[old_index]] -= 1
+            after_mega = mega_counts.copy()
+            after_mega[mega[old_index]] -= 1
+            after_mega_mains = mega_main_counts.copy()
+            after_mega_mains[mega[old_index], mains[old_index]] -= 1
+            eligible = (
+                (tiers == tiers[old_index])
+                & ~selected_mask
+                & permanently_compatible
+                & (after_mega[mega] < constraints.mega_hard_cap)
+            )
+            eligible &= np.all(after_pairs[pair_ids] == 0, axis=1)
+            eligible &= np.all(after_mains[mains] < degree_ceiling, axis=1)
+            eligible &= np.all(after_mega_mains[mega[:, None], mains] == 0, axis=1)
+            eligible_indices = np.flatnonzero(eligible)
+            if eligible_indices.size == 0:
+                continue
+            after_cost = _main_degree_collision_cost(after_mains)
+            costs = after_cost + after_mains[mains[eligible_indices]].sum(axis=1)
+            local = int(np.argmin(costs))
+            proposal = (int(costs[local]), int(eligible_indices[local]), position)
+            if best is None or proposal < best:
+                best = proposal
+        if best is None or best[0] >= base_cost:
+            break
+        selected[best[2]] = best[1]
+
+    # A neutral two-line walk escapes the final one-exchange local minimum.
+    seen = {tuple(sorted(selected))}
+    for _ in range(64):
+        (
+            selected_mask,
+            main_counts,
+            _,
+            mega_counts,
+            _,
+            _,
+        ) = _fair_packing_state(selected, mains, mega, pair_ids, tiers)
+        base_cost = _main_degree_collision_cost(main_counts)
+        if base_cost == target_collision_cost:
+            return tuple(selected)
+
+        word_count = (len(selected) + 63) // 64
+        conflicts = np.zeros((len(mains), word_count), dtype=np.uint64)
+        for position, selected_index in enumerate(selected):
+            overlaps = np.count_nonzero(
+                mains[:, :, None] == mains[selected_index][None, None, :],
+                axis=(1, 2),
+            )
+            bad = (overlaps >= 2) | ((mega == mega[selected_index]) & (overlaps >= 1))
+            conflicts[bad, position // 64] |= np.uint64(1) << np.uint64(position % 64)
+
+        pairs = [
+            (left, right)
+            for left in range(len(selected))
+            for right in range(left + 1, len(selected))
+        ]
+        rng.shuffle(pairs)
+        move: tuple[int, int, int, int, int] | None = None
+        for required_cost in (base_cost - 1, base_cost):
+            for left, right in pairs:
+                allowed_bits = np.zeros(word_count, dtype=np.uint64)
+                allowed_bits[left // 64] |= np.uint64(1) << np.uint64(left % 64)
+                allowed_bits[right // 64] |= np.uint64(1) << np.uint64(right % 64)
+                allowed = permanently_compatible.copy()
+                for word in range(word_count):
+                    allowed &= (conflicts[:, word] & ~allowed_bits[word]) == 0
+                allowed &= ~selected_mask
+
+                after_mains = main_counts.copy()
+                after_mains[mains[selected[left]]] -= 1
+                after_mains[mains[selected[right]]] -= 1
+                after_mega = mega_counts.copy()
+                after_mega[mega[selected[left]]] -= 1
+                after_mega[mega[selected[right]]] -= 1
+                after_cost = _main_degree_collision_cost(after_mains)
+                left_tier = tiers[selected[left]]
+                right_tier = tiers[selected[right]]
+                left_candidates = np.flatnonzero(allowed & (tiers == left_tier))
+                right_candidates = np.flatnonzero(allowed & (tiers == right_tier))
+                if required_cost == base_cost:
+                    rng.shuffle(left_candidates)
+                    rng.shuffle(right_candidates)
+
+                for first in left_candidates:
+                    if after_mega[mega[first]] >= constraints.mega_hard_cap:
+                        continue
+                    if np.any(after_mains[mains[first]] >= degree_ceiling):
+                        continue
+                    post_first = after_mains.copy()
+                    post_first[mains[first]] += 1
+                    overlaps = np.count_nonzero(
+                        mains[right_candidates, :, None] == mains[first][None, None, :],
+                        axis=(1, 2),
+                    )
+                    compatible = (right_candidates != first) & (overlaps <= 1)
+                    compatible &= (mega[right_candidates] != mega[first]) | (overlaps == 0)
+                    compatible &= (
+                        after_mega[mega[right_candidates]]
+                        + (mega[right_candidates] == mega[first]).astype(np.int16)
+                        < constraints.mega_hard_cap
+                    )
+                    compatible &= np.all(
+                        post_first[mains[right_candidates]] < degree_ceiling,
+                        axis=1,
+                    )
+                    possible = right_candidates[compatible]
+                    possible_overlaps = overlaps[compatible]
+                    if possible.size == 0:
+                        continue
+                    costs = (
+                        after_cost
+                        + int(after_mains[mains[first]].sum())
+                        + after_mains[mains[possible]].sum(axis=1)
+                        + possible_overlaps
+                    )
+                    choices = np.flatnonzero(costs <= required_cost)
+                    if choices.size == 0:
+                        continue
+                    choice = int(choices[0])
+                    trial = selected.copy()
+                    trial[left] = int(first)
+                    trial[right] = int(possible[choice])
+                    signature = tuple(sorted(trial))
+                    if required_cost == base_cost and signature in seen:
+                        continue
+                    seen.add(signature)
+                    move = (
+                        int(costs[choice]),
+                        left,
+                        right,
+                        int(first),
+                        int(possible[choice]),
+                    )
+                    break
+                if move is not None:
+                    break
+            if move is not None:
+                break
+        if move is None:
+            return None
+        _, move_left, move_right, move_first, move_second = move
+        selected[int(move_left)] = int(move_first)
+        selected[int(move_right)] = int(move_second)
+    return None
+
+
+def _repair_fair_packing(
+    initial_indices: Sequence[int],
+    *,
+    mains: NDArray[np.int16],
+    mega: NDArray[np.int16],
+    pair_ids: NDArray[np.int32],
+    tiers: NDArray[np.str_],
+    permanently_compatible: NDArray[np.bool_],
+    constraints: OptimizerConstraints,
+    degree_ceiling: int,
+    target_collision_cost: int,
+    seed: int,
+) -> tuple[int, ...] | None:
+    """Deterministic large-neighborhood repair for dense linear packings."""
+
+    rng = np.random.default_rng(seed ^ 0x8A5CD789635D2DFF)
+    best = tuple(initial_indices)
+    walker = best
+    best_key = (-len(best), 10**9)
+    if best:
+        state = _fair_packing_state(best, mains, mega, pair_ids, tiers)
+        best_key = (-len(best), _main_degree_collision_cost(state[1]))
+
+    # Diverse empty starts make repair robust to a poor forward-greedy prefix.
+    starts = min(50, constraints.bundle_size)
+    for _ in range(starts):
+        trial = _extend_fair_packing(
+            (),
+            mains=mains,
+            mega=mega,
+            pair_ids=pair_ids,
+            tiers=tiers,
+            permanently_compatible=permanently_compatible,
+            constraints=constraints,
+            degree_ceiling=degree_ceiling,
+            rng=rng,
+        )
+        trial_state = _fair_packing_state(trial, mains, mega, pair_ids, tiers)
+        key = (-len(trial), _main_degree_collision_cost(trial_state[1]))
+        if key < best_key:
+            best, walker, best_key = trial, trial, key
+
+    for _ in range(2_000):
+        if len(best) == constraints.bundle_size:
+            balanced = _balance_complete_fair_packing(
+                best,
+                mains=mains,
+                mega=mega,
+                pair_ids=pair_ids,
+                tiers=tiers,
+                permanently_compatible=permanently_compatible,
+                constraints=constraints,
+                degree_ceiling=degree_ceiling,
+                target_collision_cost=target_collision_cost,
+                rng=rng,
+            )
+            if balanced is not None:
+                return balanced
+
+        if not walker:
+            base: tuple[int, ...] = ()
+        else:
+            destroy_max = min(20, len(walker))
+            destroy_min = min(6, destroy_max)
+            destroy_count = int(rng.integers(destroy_min, destroy_max + 1))
+            removed = set(
+                int(value) for value in rng.choice(walker, size=destroy_count, replace=False)
+            )
+            base = tuple(index for index in walker if index not in removed)
+        trial = _extend_fair_packing(
+            base,
+            mains=mains,
+            mega=mega,
+            pair_ids=pair_ids,
+            tiers=tiers,
+            permanently_compatible=permanently_compatible,
+            constraints=constraints,
+            degree_ceiling=degree_ceiling,
+            rng=rng,
+        )
+        trial_state = _fair_packing_state(trial, mains, mega, pair_ids, tiers)
+        key = (-len(trial), _main_degree_collision_cost(trial_state[1]))
+        if key < best_key:
+            best, best_key = trial, key
+        if len(trial) > len(walker) or (len(trial) == len(walker) and rng.random() < 0.03):
+            walker = trial
+        elif rng.random() < 0.02:
+            walker = best
+    return None
+
+
 def optimize_fair_coverage(
     candidate_pool: CandidatePool | Sequence[Candidate],
     model: FittedModel,
@@ -629,7 +1031,7 @@ def optimize_fair_coverage(
 
     Requiring every main-number pair to be globally unique makes any two lines
     share at most one main.  The greedy cost is the exact incremental convex
-    reuse cost, so it balances 150 number incidences across 47 labels.  Mega
+    reuse cost, so it balances all main incidences across 47 labels.  Mega
     repeats are permitted only between main-disjoint lines, eliminating lost
     fair 3+Mega coverage.  Multiple deterministic restarts are ranked by exact
     enumeration, never by a fitted historical distribution.
@@ -645,6 +1047,7 @@ def optimize_fair_coverage(
     for tier in _TIER_ORDER:
         if sum(candidate.tier == tier for candidate in candidates) < constraints.tickets_per_tier:
             raise OptimizationError(f"candidate pool lacks enough {tier} tickets")
+    certificate = fair_coverage_certificate(constraints.bundle_size)
 
     prior = _previous_main_set(previous_draw)
     mains, mega, pair_ids, _, tiers = _candidate_arrays(candidates)
@@ -656,8 +1059,14 @@ def optimize_fair_coverage(
         )
         permanently_compatible &= ~aggressive | (overlaps_prior <= 1)
 
+    for tier in _TIER_ORDER:
+        eligible_tier_count = int(np.count_nonzero(permanently_compatible & (tiers == tier)))
+        if eligible_tier_count < constraints.tickets_per_tier:
+            raise OptimizationError(f"candidate pool lacks enough prior-compatible {tier} tickets")
+
     schedule = tuple(tier for _ in range(constraints.tickets_per_tier) for tier in _TIER_ORDER)
     variants: list[tuple[tuple[int, ...], tuple[Candidate, ...]]] = []
+    partials: list[tuple[int, ...]] = []
     base_tie_seed = 0x647373683
     for restart in range(restarts):
         tie_seed = base_tie_seed if restart == 0 else (seed ^ (restart * 0x9E3779B9))
@@ -666,6 +1075,7 @@ def optimize_fair_coverage(
         main_counts = np.zeros(48, dtype=np.int16)
         pair_counts = np.zeros(48 * 48, dtype=np.int16)
         mega_counts = np.zeros(28, dtype=np.int16)
+        mega_main_counts = np.zeros((28, 48), dtype=np.int16)
         selected_indices: list[int] = []
         feasible = True
 
@@ -677,18 +1087,14 @@ def optimize_fair_coverage(
                 & (mega_counts[mega] < constraints.mega_hard_cap)
             )
             eligible &= np.all(pair_counts[pair_ids] == 0, axis=1)
-            # A cap of five is a feasibility guard; the convex score normally
-            # reaches the sharper balanced 38x3 + 9x4 degree distribution.
-            eligible &= np.all(main_counts[mains] < 5, axis=1)
-            for selected_index in selected_indices:
-                same_mega = mega == mega[selected_index]
-                if not np.any(same_mega):
-                    continue
-                overlap = np.count_nonzero(
-                    mains[:, :, None] == mains[selected_index][None, None, :],
-                    axis=(1, 2),
-                )
-                eligible &= ~same_mega | (overlap == 0)
+            # Hitting the certificate requires the balanced q/q+1 degree
+            # sequence for this bundle size.  The ceiling was historically
+            # four for 30 lines and is seven for 60 lines.
+            eligible &= np.all(
+                main_counts[mains] < certificate.main_degree_ceiling,
+                axis=1,
+            )
+            eligible &= np.all(mega_main_counts[mega[:, None], mains] == 0, axis=1)
             eligible_indices = np.flatnonzero(eligible)
             if eligible_indices.size == 0:
                 feasible = False
@@ -706,7 +1112,9 @@ def optimize_fair_coverage(
             main_counts[mains[chosen_index]] += 1
             pair_counts[pair_ids[chosen_index]] += 1
             mega_counts[mega[chosen_index]] += 1
+            mega_main_counts[mega[chosen_index], mains[chosen_index]] += 1
 
+        partials.append(tuple(selected_indices))
         if not feasible:
             continue
         selected = tuple(candidates[index] for index in selected_indices)
@@ -735,9 +1143,63 @@ def optimize_fair_coverage(
             )
         )
 
-    if not variants:
-        raise OptimizationError("fair structural optimizer found no feasible bundle")
-    _, selected = max(variants, key=lambda item: item[0])
+    if not any(
+        matches_fair_coverage_certificate(
+            exact_uniform_metrics(tuple(candidate.ticket for candidate in item[1])),
+            constraints.bundle_size,
+        )
+        for item in variants
+    ):
+        best_partial = max(
+            partials,
+            key=lambda indices: (
+                len(indices),
+                -_main_degree_collision_cost(
+                    _fair_packing_state(indices, mains, mega, pair_ids, tiers)[1]
+                ),
+            ),
+        )
+        repaired_indices = _repair_fair_packing(
+            best_partial,
+            mains=mains,
+            mega=mega,
+            pair_ids=pair_ids,
+            tiers=tiers,
+            permanently_compatible=permanently_compatible,
+            constraints=constraints,
+            degree_ceiling=certificate.main_degree_ceiling,
+            target_collision_cost=certificate.intersecting_line_pair_count,
+            seed=seed,
+        )
+        if repaired_indices is not None:
+            repaired = tuple(candidates[index] for index in repaired_indices)
+            repaired_exact = exact_uniform_metrics(tuple(item.ticket for item in repaired))
+            variants.append(
+                (
+                    (
+                        repaired_exact.covered_ge_3_mains_count,
+                        repaired_exact.covered_3_plus_mega_count,
+                        repaired_exact.covered_ge_4_mains_count,
+                        int(round(repaired_exact.mean_best_main_matches * 1_000_000_000)),
+                    ),
+                    repaired,
+                )
+            )
+
+    certified_variants = [
+        item
+        for item in variants
+        if matches_fair_coverage_certificate(
+            exact_uniform_metrics(tuple(candidate.ticket for candidate in item[1])),
+            constraints.bundle_size,
+        )
+    ]
+    if not certified_variants:
+        raise OptimizationError(
+            f"failed size-aware global fair-coverage certificate for "
+            f"{constraints.bundle_size} lines"
+        )
+    _, selected = max(certified_variants, key=lambda item: item[0])
     selected_tickets = tuple(candidate.ticket for candidate in selected)
     selected_tiers = tuple(candidate.tier for candidate in selected)
     exact = exact_uniform_metrics(selected_tickets)

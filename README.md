@@ -55,7 +55,7 @@ slp generate
 slp audit
 ```
 
-`generate` performs a live source-freshness check by default. Once the intended result posts, `slp cycle` verifies it, scores its locked bundle, appends scoring, advances verified history, recalibrates when due, generates at least 50,000 candidates, globally optimizes the next 30 lines, validates every constraint, and locks the result.
+`generate` performs a live source-freshness check by default. Once the intended result posts, `slp cycle` verifies it, scores its locked bundle, appends scoring, advances verified history, recalibrates when due, generates at least 50,000 candidates, globally optimizes the next 60 lines, validates every constraint, and locks the result.
 
 Re-running a successful operation is idempotent: it returns the existing content-addressed artifact and cannot create a duplicate history row, bundle, or score.
 
@@ -77,29 +77,45 @@ Re-running a successful operation is idempotent: it returns the existing content
   fixed-point weight snapshot, and complete ordered candidate pool.
 - Simulation-backed greedy submodular selection using each candidate's marginal bundle contribution.
 - An exact fair-uniform structural challenger, evaluated over all `1,533,939`
-  valid main draws. Evidence schema v3 requires the configured improvement over
-  the model-selected candidate, a separate non-regression check against any
-  same-date incumbent, preserved 4+/jackpot coverage, and the configured
-  max-overlap-one, pairwise-linear 30-line certificate: `258,582` covered 3+
-  main draws and `264,630` covered 3+Mega full outcomes. The evidence also binds
-  stable model-conditional estimates for both choices and records the tradeoff;
-  while fitted-model skill remains unvalidated, the explicit policy favors
-  exact fair-null robustness rather than an unsupported modeled advantage.
+  valid main draws. Evidence schema v4 binds the certificate to the configured
+  bundle size, requires the configured improvement over the model-selected
+  candidate, applies a separate non-regression check against any same-date
+  incumbent, and preserves 4+/jackpot coverage. The default max-overlap-one,
+  pairwise-linear 60-line certificate covers `499,992` 3+ main draws and
+  `529,260` 3+Mega full outcomes. Legacy evidence through v3 remains valid for
+  the immutable 30-line v1-v5 bundles. Promotion evidence binds stable
+  model-conditional estimates for both choices and records the tradeoff; while
+  fitted-model skill remains unvalidated, the explicit policy favors exact
+  fair-null robustness rather than an unsupported modeled advantage.
 - Adaptive final simulation until Wilson confidence intervals meet the configured tolerance for consecutive batches.
 - Mild positional recentering is screened locally, then accepted only when a
   separate common-scenario production-scale comparison is stable, the global
   objective does not decline, and all constraints remain valid.
 
-Production bundles contain ten genuinely distinct Aggressive, Balanced, and Conservative lines. Aggressive candidates emphasize recent conviction and may overlap the previous official mains by at most one; Balanced lines emphasize marginal bundle coverage; Conservative lines blend toward the stable long-run distribution.
+Production bundles contain 20 genuinely distinct Aggressive, Balanced, and
+Conservative lines. Aggressive candidates emphasize recent conviction and may
+overlap the previous official mains by at most one; Balanced lines emphasize
+marginal bundle coverage; Conservative lines blend toward the stable long-run
+distribution.
 
 `slp odds` reports exact fair-uniform combinatorial coverage separately from
 model-conditional simulation. The latter is an experimental assumption, not
-an objective lottery probability. For 30 distinct full tickets, jackpot
-coverage is always `30 / 41,416,353` (about 1 in 1,380,545); number selection
-cannot improve that quantity. Reducing overlap waste can increase the fair
-probability that at least one line reaches a lower-match threshold by reducing
-correlated coverage. It does not change a line's fair odds, increase the
-expected number of prizes, or establish a player or expected-value edge.
+an objective lottery probability. The exact certified regimes are:
+
+| Regime | Lines | Fair P(any 3+ mains) | Fair P(any 4+ mains) | Jackpot coverage |
+| --- | ---: | ---: | ---: | ---: |
+| Immutable v5 baseline | 30 | `258582 / 1533939` = 16.8574% | `6330 / 1533939` = 0.4127% | `30 / 41416353`, about 1 in 1,380,545 |
+| Default separately optimized bundle | 60 | `499992 / 1533939` = 32.5953% | `12660 / 1533939` = 0.8253% | `60 / 41416353`, about 1 in 690,273 |
+
+The certified 60-line bundle is optimized as one unit. It is not a nested
+30-line add-on and does not promise that the immutable v5 tickets appear as a
+prefix. Its exact fair P(any 3+Mega) is `529260 / 41416353` = 1.2779%, compared
+with `264630 / 41416353` = 0.6390% for the certified 30-line baseline. Buying
+twice as many distinct tickets doubles ticket cost and jackpot coverage; it
+does not improve any individual ticket's odds or create positive expected
+value. Reducing overlap waste can improve bundle-union coverage at lower-match
+thresholds for a fixed line count, but it cannot make a random draw predictable
+or guarantee any prize.
 
 ## Bundle constraints
 
@@ -107,8 +123,8 @@ expected number of prizes, or establish a player or expected-value edge.
 - Maximum three shared mains and minimum two main replacements between tickets.
 - Any main pair appears at most twice; any triple appears at most once.
 - A promoted fair-coverage bundle tightens main overlap and pair repetition to
-  one, balances all 150 main incidences, and permits Mega repeats only between
-  main-disjoint lines.
+  one, balances all 300 main incidences in the default 60-line regime, and
+  permits Mega repeats only between main-disjoint lines.
 - Mega repeats receive a soft penalty and cannot exceed the hard cap.
 - Reused mains, pairs, triples, correlated tickets, and excess Mega repetition incur anti-cannibalization penalties.
 - Adjacency is allowed. Parity and band rules are disabled.
@@ -163,11 +179,16 @@ historical correction was applied.
 
 See [the audit report](docs/LEGACY_AUDIT.md) and [machine-readable manifest](data/reconciled/legacy_audit_manifest.json).
 
-At the 2026-07-17 release audit, the immutable correction chain contains five
-July 18 bundles and four calibrations across 230 hash-chained audit events.
-Versions v1 through v4 remain preserved; v4 is retained as gate-regression
-evidence, and `slp-2026-07-18-v5-ca0077ce15c2753f` is the sole active bundle.
-The complete rationale is in [the production audit](docs/PRODUCTION_AUDIT.md).
+At the 2026-07-17 release audit, the immutable correction chain contains six
+July 18 bundles and five calibrations across 233 hash-chained audit events,
+with no score recorded before the intended result. Versions v1 through v5
+remain preserved; v4 is retained as gate-regression evidence and v5 remains
+the certified 30-line baseline. The sole active bundle is the separately
+optimized 60-line correction
+`slp-2026-07-18-v6-1b2ab3a08f1855e3`, with 20 Aggressive, 20 Balanced, and 20
+Conservative lines. It supersedes v5 without changing it and is not a nested
+30-line extension. The complete rationale, identities, and measured tradeoffs
+are in [the production audit](docs/PRODUCTION_AUDIT.md).
 
 ## Validation and automation
 

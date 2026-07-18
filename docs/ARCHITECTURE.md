@@ -13,11 +13,13 @@ The system treats external result pages, legacy CSVs, caches, and CLI arguments 
 7. Candidate generation samples mains without replacement and Mega independently from tier-specific distributions using a recorded deterministic seed.
 8. The model optimizer greedily selects maximum marginal simulated coverage under global diversity constraints and records each contribution.
 9. A same-pool structural challenger builds a balanced linear packing and
-   measures every possible fair main draw exactly. Evidence schema v3 applies
+   measures every possible fair main draw exactly. Evidence schema v4 applies
    the configured improvement threshold against the model candidate and a
    separate non-regression gate against the actual same-date incumbent. It
    binds stable model-conditional simulations for each choice, records their
-   relative tradeoff, and requires the global 30-line coverage certificate.
+   relative tradeoff, and requires the global coverage certificate for the
+   configured bundle size. Evidence schema v4 records that certificate size;
+   older evidence schemas remain available for immutable historical replay.
    While model skill is explicitly unvalidated, the configured policy favors
    fair-null robustness. The full ordered candidate pool is SHA-256 bound.
    New pools use `portable-fixed-point-splitmix64-v2`: decimal tier transforms
@@ -53,6 +55,12 @@ The system treats external result pages, legacy CSVs, caches, and CLI arguments 
 
 Mains and Mega are fitted and selected independently. Every walk-forward fold trains on a prefix whose cutoff precedes its target. The selection rank is bundle performance; likelihood only filters unstable candidates. The 240-draw anchor cannot win without the configured improvement. Calibration artifacts preserve all candidate scores, fold cutoffs, fitted distributions, selected parameters, triggers, parent calibration, history hash, configuration hash, deterministic seed, and scored-draw cadence. Calibration identity is content-derived from the reproducible fit inputs and selected parameters. Replaying the same fit may change only lifecycle timestamps/reasons; storage returns the existing immutable artifact and does not append a duplicate calibration or audit event.
 
+Backtest fold seeds are separately derived from a canonical prefix containing
+only draw date, official draw ID, mains, and Mega. Verification timestamps,
+source-response hashes, and whole-snapshot hashes are lineage metadata, not seed
+inputs; excluding them prevents a later-fetched archive page from indirectly
+committing a held-out result into an earlier fold's candidate bundle.
+
 Candidate-pool v1 is frozen for backward compatibility. It used NumPy
 high-level sampling and included an exact floating log weight in its digest, so
 replay is supported only as a best-effort forensic check in the exact originating
@@ -69,16 +77,27 @@ Grind mode keeps `P(any ticket >=3 mains)` primary. Secondary terms reward `>=4`
 ## Exact fair-coverage guard
 
 The fair null enumerates all `C(47,5) = 1,533,939` main outcomes and all 27
-Mega values. A line covers 8,821 main outcomes at 3+ and 211 at 4+. The
-structural optimizer selects 30 pairwise-linear main sets and balances their
-150 number incidences as 38 labels used three times and nine used four times.
-Within the promoted guard's max-overlap-one, pair-cap-one structural class, the
-resulting 258,582 covered 3+ outcomes are globally maximal; 6,330 covered 4+
-outcomes are also maximal.
-Mega reuse is allowed only between main-disjoint lines, reaching the 264,630
-3+Mega full-outcome ceiling. These exact combinatorial values are stored and
-reported separately from fitted-model simulations; they do not establish that
-historical number weights predict future draws.
+Mega values. A line covers 8,821 main outcomes at 3+ and 211 at 4+. For `n`
+pairwise-linear lines, let `q, r = divmod(5n, 47)`. The certificate balances
+main-number degrees between `q` and `q + 1`, giving
+`(47-r) C(q,2) + r C(q+1,2)` shared-line intersections. The certified 3+
+coverage is `8,821n` minus 36 times that intersection count; 4+ coverage is
+`211n`.
+
+The default 60-line optimizer balances 300 incidences as 29 numbers used six
+times and 18 used seven times. In the max-overlap-one, pair-cap-one structural
+class, its certificate covers 499,992 main outcomes at 3+ and 12,660 at 4+.
+Mega reuse is allowed only between main-disjoint lines, reaching 529,260
+3+Mega full outcomes and 12,660 4+Mega full outcomes. The immutable v5 baseline
+retains its independent 30-line certificate: 258,582 at 3+, 6,330 at 4+, and
+264,630 at 3+Mega. The 60-line result is separately optimized and is not
+defined as a nested extension of that historical bundle.
+
+These exact combinatorial values are stored and reported separately from
+fitted-model simulations. Sixty distinct tickets double cost and jackpot
+coverage relative to 30, but neither certificate changes per-ticket odds,
+proves that historical weights predict a future draw, creates an expected-value
+edge, or guarantees a prize.
 
 ## Failure semantics
 

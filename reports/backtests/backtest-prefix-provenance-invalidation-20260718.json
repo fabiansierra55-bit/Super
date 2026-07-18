@@ -1,0 +1,62 @@
+{
+  "schema_version": "slp-backtest-invalidation-v1",
+  "invalidation_id": "backtest-prefix-provenance-invalidation-20260718-v1",
+  "status": "invalidated",
+  "scope": "invalidated_for_model_performance_evaluation",
+  "reason_code": "post_target_archive_provenance_seed_leakage",
+  "reason": "The reports hashed complete VerifiedDraw objects for each training prefix. Those objects included raw archive-response hashes and fetch provenance recorded after the held-out targets; the underlying archive/year responses contained target and later draw results. This indirectly committed deterministic seeds to future response content even though model fitting used only prefix draw rows.",
+  "correction": "The replacement hashes only cutoff-safe draw facts (draw date, draw ID, five mains, and Mega) under cutoff-draw-facts-v1, excludes all verification provenance, and derives seeds under prefix-draw-facts-target-model-v3.",
+  "original_bytes_preserved": true,
+  "recorded_timestamp_utc": "2026-07-18T05:41:42Z",
+  "immutability_policy": "This sidecar is append-only audit evidence. Corrections must create a new versioned sidecar and preserve every listed artifact.",
+  "misleading_embedded_claims": {
+    "json_no_future_information": true,
+    "json_report_type_contains_cutoff_safe": true,
+    "markdown_heading": "Cutoff-safe SuperLotto Plus backtest",
+    "markdown_no_future_information": true
+  },
+  "invalidated_artifacts": [
+    {
+      "path": "reports/backtests/backtest-2026-07-15-bb46bccd81f51c02.json",
+      "sha256": "bb46bccd81f51c028bdabea2a3f974688e1342fa0e886e6dbc76d5e94e2e569f"
+    },
+    {
+      "path": "reports/backtests/backtest-2026-07-15-bb46bccd81f51c02.md",
+      "sha256": "57b9ecb39708ed724fdaf504598298262fd2bc692098dadf58d50fbc70d0c986"
+    },
+    {
+      "path": "reports/backtests/backtest-2026-07-15-ed35eacc2d22067d.json",
+      "sha256": "ed35eacc2d22067d3a21edd06a640549be54de641fb5c3392936de8673e7518e"
+    },
+    {
+      "path": "reports/backtests/backtest-2026-07-15-ed35eacc2d22067d.md",
+      "sha256": "e68598ef653324ff1af291ac43fa3a8ec9f2ef93c62bdab46b4766ecf1ed7894"
+    },
+    {
+      "path": "reports/backtests/backtest-2026-07-15-8b1a9edbd72de84d.json",
+      "sha256": "8b1a9edbd72de84dcafd18ac8b8d05b583a1a72f07bd805f2f54dfa151566270"
+    },
+    {
+      "path": "reports/backtests/backtest-2026-07-15-8b1a9edbd72de84d.md",
+      "sha256": "e68598ef653324ff1af291ac43fa3a8ec9f2ef93c62bdab46b4766ecf1ed7894"
+    },
+    {
+      "path": "reports/backtests/backtest-2026-07-15-be1d0fc2d611af48.json",
+      "sha256": "be1d0fc2d611af48b8ec12cd8af5f36829f5409f227945205232c31160c32b02"
+    },
+    {
+      "path": "reports/backtests/backtest-2026-07-15-be1d0fc2d611af48.md",
+      "sha256": "1a063bc6b13bb336fe47c40995846f2b5d006fe40828005a38602f1eb3e5767f"
+    }
+  ],
+  "replacement_artifacts": [
+    {
+      "path": "reports/backtests/backtest-2026-07-15-c300d7839e51e141.json",
+      "sha256": "c300d7839e51e141ee92831985be1ec03c75612b8051c8a77c916716c01ac741"
+    },
+    {
+      "path": "reports/backtests/backtest-2026-07-15-c300d7839e51e141.md",
+      "sha256": "c4f7a0376f868d5dc3952161a56ed1c19bc2e72f95de8f636e32104ad5bf9560"
+    }
+  ]
+}

@@ -4,7 +4,13 @@ from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
 
-from slp_model.backtesting import run_backtest
+from slp_model.backtesting import (
+    BACKTEST_PREFIX_ALGORITHM_VERSION,
+    BACKTEST_SEED_ALGORITHM_VERSION,
+    _prefix_sha256,
+    _seed,
+    run_backtest,
+)
 from slp_model.config import AppConfig
 from slp_model.models import SourceEvidence, VerificationMetadata, VerifiedDraw
 
@@ -96,3 +102,115 @@ def test_backtest_prediction_is_invariant_to_target_numbers() -> None:
                 original_candidate["predicted_p_any_ge_4_mains"]
                 == changed_candidate["predicted_p_any_ge_4_mains"]
             )
+
+
+def test_backtest_seed_for_common_target_is_invariant_to_evaluation_count() -> None:
+    history = _verified_history(64)
+    config = AppConfig()
+
+    def fold_seeds(evaluations: int) -> dict[date, int]:
+        start = len(history) - evaluations
+        return {
+            history[target_index].draw_date: _seed(
+                _prefix_sha256(history[:target_index]),
+                history[target_index].draw_date,
+                config.model_version,
+            )
+            for target_index in range(start, len(history))
+        }
+
+    one_fold = fold_seeds(1)
+    two_folds = fold_seeds(2)
+    common_target = history[-1].draw_date
+    assert one_fold[common_target] == two_folds[common_target]
+
+
+def test_backtest_prefix_seed_excludes_post_target_verification_provenance() -> None:
+    history = _verified_history(64)
+    prefix = history[:-1]
+    altered_prefix: list[VerifiedDraw] = []
+    for offset, draw in enumerate(prefix):
+        changed_sources = tuple(
+            source.model_copy(
+                update={
+                    "fetched_timestamp_utc": source.fetched_timestamp_utc
+                    + timedelta(days=365 + offset),
+                    "raw_sha256": f"{10_000 + offset:064x}"[-64:],
+                }
+            )
+            for source in draw.verification.sources
+        )
+        changed_verification = draw.verification.model_copy(
+            update={
+                "verified_timestamp_utc": draw.verification.verified_timestamp_utc
+                + timedelta(days=365 + offset),
+                "sources": changed_sources,
+                "comparison_sha256": f"{20_000 + offset:064x}"[-64:],
+            }
+        )
+        altered_prefix.append(draw.model_copy(update={"verification": changed_verification}))
+
+    original_hash = _prefix_sha256(prefix)
+    altered_hash = _prefix_sha256(altered_prefix)
+    target = history[-1].draw_date
+    assert original_hash == altered_hash
+    assert _seed(original_hash, target, AppConfig().model_version) == _seed(
+        altered_hash, target, AppConfig().model_version
+    )
+
+    changed_fact = list(prefix)
+    replacement_mega = 1 if changed_fact[-1].mega != 1 else 2
+    changed_fact[-1] = changed_fact[-1].model_copy(update={"mega": replacement_mega})
+    assert _prefix_sha256(changed_fact) != original_hash
+
+
+def test_backtest_fold_seed_is_invariant_to_future_suffix_content() -> None:
+    history = _verified_history(66)
+    target_index = 63
+    target_date = history[target_index].draw_date
+    original_prefix_hash = _prefix_sha256(history[:target_index])
+    original_seed = _seed(original_prefix_hash, target_date, AppConfig().model_version)
+
+    altered = list(history)
+    for index in range(target_index, len(altered)):
+        original = altered[index]
+        replacement_mains = (
+            (1, 2, 3, 4, 47)
+            if original.mains != (1, 2, 3, 4, 47)
+            else (
+                2,
+                3,
+                4,
+                5,
+                46,
+            )
+        )
+        altered[index] = original.model_copy(
+            update={"mains": replacement_mains, "mega": 27 if original.mega != 27 else 26}
+        )
+
+    altered_prefix_hash = _prefix_sha256(altered[:target_index])
+    assert altered_prefix_hash == original_prefix_hash
+    assert _seed(altered_prefix_hash, target_date, AppConfig().model_version) == original_seed
+
+
+def test_backtest_report_records_cutoff_safe_seed_contract() -> None:
+    history = _verified_history(63)
+    report = run_backtest(
+        history,
+        history_snapshot_sha256="f" * 64,
+        config=AppConfig(),
+        evaluations=1,
+        diagnostic_candidate_pool_size=300,
+        optimization_simulations=256,
+        final_simulations=1_000,
+    )
+
+    assert report["schema_version"] == 4
+    assert report["backtest_prefix_algorithm_version"] == BACKTEST_PREFIX_ALGORITHM_VERSION
+    assert report["backtest_seed_algorithm_version"] == BACKTEST_SEED_ALGORITHM_VERSION
+    assert report["history_snapshot_used_for_seed"] is False
+    assert (
+        report["records"][0]["training_prefix_algorithm_version"]
+        == BACKTEST_PREFIX_ALGORITHM_VERSION
+    )

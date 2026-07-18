@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .exceptions import ConfigurationError
 
 GAME_RULES_VERSION = "slp-5of47-mega-1of27-v1"
-MODEL_VERSION = "slp-robust-fair-coverage-v4"
+MODEL_VERSION = "slp-robust-fair-coverage-v5"
 
 
 class FrozenModel(BaseModel):
@@ -101,7 +101,7 @@ class TrainingConfig(FrozenModel):
     mega_sigmas: tuple[float, ...] = (0.9, 1.0, 1.15, 1.3)
     half_lives_draws: tuple[float, ...] = (16, 20, 24, 28, 36, 45, 60)
     forward_folds: int = Field(default=12, ge=3)
-    forward_bundle_size: int = Field(default=30, ge=3, le=100)
+    forward_bundle_size: int = Field(default=60, ge=3, le=100)
     likelihood_stability_margin: float = Field(default=1.5, ge=0)
     reselection_interval_scored_draws: int = Field(default=10, ge=1)
     drift_calibration_error_threshold: float = Field(default=0.12, ge=0)
@@ -139,10 +139,10 @@ class SimulationConfig(FrozenModel):
 
 
 class BundleConfig(FrozenModel):
-    size: int = Field(default=30, ge=1)
-    aggressive_count: int = Field(default=10, ge=0)
-    balanced_count: int = Field(default=10, ge=0)
-    conservative_count: int = Field(default=10, ge=0)
+    size: int = Field(default=60, ge=1)
+    aggressive_count: int = Field(default=20, ge=0)
+    balanced_count: int = Field(default=20, ge=0)
+    conservative_count: int = Field(default=20, ge=0)
     max_main_overlap: int = Field(default=3, ge=0, le=5)
     min_hamming_distance: int = Field(default=2, ge=0, le=5)
     pair_repeat_cap: int = Field(default=2, ge=1)
@@ -192,9 +192,15 @@ class FairCoverageConfig(FrozenModel):
     minimum_relative_improvement: float = Field(default=0.001, ge=0, le=0.25)
     max_main_overlap: Literal[1] = 1
     pair_repeat_cap: Literal[1] = 1
-    mega_soft_cap: Literal[1] = 1
-    mega_hard_cap: Literal[2] = 2
+    mega_soft_cap: int = Field(default=2, ge=1, le=100)
+    mega_hard_cap: int = Field(default=3, ge=1, le=100)
     anti_cannibalization_weight: float = Field(default=0.15, ge=0)
+
+    @model_validator(mode="after")
+    def validate_mega_caps(self) -> FairCoverageConfig:
+        if self.mega_soft_cap > self.mega_hard_cap:
+            raise ValueError("fair-coverage Mega soft cap cannot exceed hard cap")
+        return self
 
 
 class PathsConfig(FrozenModel):
@@ -226,6 +232,21 @@ class AppConfig(FrozenModel):
     paths: PathsConfig = PathsConfig()
     git: GitConfig = GitConfig()
     model_version: str = MODEL_VERSION
+
+    @model_validator(mode="after")
+    def training_bundle_matches_production(self) -> AppConfig:
+        if self.training.forward_bundle_size != self.bundle.size:
+            raise ValueError("training forward bundle size must match production bundle size")
+        tier_counts = (
+            self.bundle.aggressive_count,
+            self.bundle.balanced_count,
+            self.bundle.conservative_count,
+        )
+        if len(set(tier_counts)) != 1:
+            raise ValueError("production optimizer requires equal tier quotas")
+        if self.fair_coverage.enabled and self.bundle.size > 27 * self.fair_coverage.mega_hard_cap:
+            raise ValueError("fair-coverage Mega hard cap cannot accommodate the bundle size")
+        return self
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> AppConfig:

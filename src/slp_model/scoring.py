@@ -286,6 +286,12 @@ def _rolling_calibration(
     return result
 
 
+def _score_regime(score: BundleScore) -> tuple[int, str]:
+    """Return legacy-safe provenance used to delimit calibration regimes."""
+
+    return (score.bundle_size or len(score.lines), score.model_version)
+
+
 def score_locked_bundle(
     bundle: LockedBundle,
     draw: VerifiedDraw,
@@ -308,6 +314,10 @@ def score_locked_bundle(
         previous_scores,
         current_bundle_id=bundle.metadata.bundle_id,
         current_draw_date=draw.draw_date,
+    )
+    current_regime = (bundle.metadata.bundle_size, bundle.metadata.model_version)
+    regime_scores = tuple(
+        score for score in historical_scores if _score_regime(score) == current_regime
     )
 
     scored_lines: list[ScoredLine] = []
@@ -335,11 +345,18 @@ def score_locked_bundle(
     realized = _realized_metrics(scored_lines)
     predicted = bundle.metadata.simulation
     calibration = _rolling_calibration(
-        historical_scores,
+        regime_scores,
         predicted_p_ge_3=predicted.p_any_ge_3_mains,
         realized_p_ge_3=float(bool(realized["any_ge_3_mains"])),
         predicted_p_ge_4=predicted.p_any_ge_4_mains,
         realized_p_ge_4=float(bool(realized["any_ge_4_mains"])),
+    )
+    calibration.update(
+        {
+            "regime_bundle_size": float(bundle.metadata.bundle_size),
+            "regime_prior_score_count": float(len(regime_scores)),
+            "regime_excluded_score_count": float(len(historical_scores) - len(regime_scores)),
+        }
     )
     identity = {
         "bundle_id": bundle.metadata.bundle_id,
@@ -356,6 +373,8 @@ def score_locked_bundle(
         intended_draw_date=bundle.metadata.intended_draw_date,
         draw=draw,
         lines=tuple(scored_lines),
+        bundle_size=bundle.metadata.bundle_size,
+        model_version=bundle.metadata.model_version,
         overall=overall,
         tiers=tiers,
         best_line_keys=best_line_keys,

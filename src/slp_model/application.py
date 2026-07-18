@@ -127,6 +127,7 @@ class Application:
                 {
                     "bundle_id": bundle.metadata.bundle_id,
                     "intended_draw_date": bundle.metadata.intended_draw_date.isoformat(),
+                    "bundle_size": bundle.metadata.bundle_size,
                     "lock_version": bundle.metadata.lock_version,
                     "active": bundle.metadata.bundle_id not in superseded_bundle_ids,
                     "supersedes_bundle_id": bundle.metadata.supersedes_bundle_id,
@@ -153,6 +154,14 @@ class Application:
             "project_root": str(self.project_root),
             "game_rules_version": self.config.game.rules_version,
             "model_version": self.config.model_version,
+            "production_bundle": {
+                "bundle_size": self.config.bundle.size,
+                "tier_counts": {
+                    "aggressive": self.config.bundle.aggressive_count,
+                    "balanced": self.config.bundle.balanced_count,
+                    "conservative": self.config.bundle.conservative_count,
+                },
+            },
             "history": history_summary,
             "calibration": (
                 {
@@ -185,6 +194,11 @@ class Application:
             "bundle_id": bundle.metadata.bundle_id,
             "intended_draw_date": bundle.metadata.intended_draw_date.isoformat(),
             "model_version": bundle.metadata.model_version,
+            "bundle_size": bundle.metadata.bundle_size,
+            "tier_counts": {
+                tier: sum(line.strategy == tier for line in bundle.lines)
+                for tier in ("aggressive", "balanced", "conservative")
+            },
             "lock_version": bundle.metadata.lock_version,
             "lines": [line.model_dump(mode="json") for line in bundle.lines],
         }
@@ -196,6 +210,7 @@ class Application:
         return {
             "bundle_id": bundle.metadata.bundle_id,
             "intended_draw_date": bundle.metadata.intended_draw_date.isoformat(),
+            "bundle_size": bundle.metadata.bundle_size,
             "fair_uniform_exact": exact.model_dump(mode="json"),
             "model_conditional_simulation": bundle.metadata.simulation.model_dump(
                 mode="json", exclude={"fair_uniform_exact"}
@@ -208,6 +223,7 @@ class Application:
                     "selected": evidence.selected,
                     "selection_reason": evidence.selection_reason,
                     "global_optimum_certified": evidence.global_optimum_certified,
+                    "certificate_bundle_size": evidence.certificate_bundle_size,
                     "recorded_gate_relative_primary_improvement": (
                         evidence.relative_primary_improvement
                     ),

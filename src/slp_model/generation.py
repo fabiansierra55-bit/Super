@@ -18,13 +18,11 @@ from .constraints import validate_bundle
 from .dates import next_draw_date
 from .exceptions import SimulationStabilityError
 from .fair_odds import (
-    OPTIMAL_30_LINE_3_PLUS_MEGA_COUNT,
-    OPTIMAL_30_LINE_GE3_COUNT,
-    OPTIMAL_30_LINE_GE4_COUNT,
     exact_coverage_regressions,
     exact_uniform_metrics,
     fair_challenger_decision,
     fair_uniform_model,
+    matches_fair_coverage_certificate,
 )
 from .models import (
     BundleMetadata,
@@ -53,6 +51,9 @@ from .simulation import (
     generate_candidate_pool,
 )
 from .storage import canonical_json_bytes, sha256_bytes
+
+FAIR_OPTIMIZER_ALGORITHM_VERSION = "exact-fair-linear-packing-lns-exchange-v5"
+ADAPTIVE_OPTIMIZER_ALGORITHM_VERSION = "simulation-greedy-submodular-v5-fair-robustness-evaluated"
 
 
 def deterministic_seed(
@@ -301,11 +302,20 @@ def build_locked_bundle(
         )
         fair_tickets = tuple(candidate.ticket for candidate in fair_optimized.candidates)
         challenger_fair = exact_uniform_metrics(fair_tickets)
+        challenger_certified = matches_fair_coverage_certificate(
+            challenger_fair, config.bundle.size
+        )
+        if config.fair_coverage.require_global_optimum and not challenger_certified:
+            raise ValueError(
+                "fair structural optimizer failed the configured size-aware certificate"
+            )
         promotion_decision = fair_challenger_decision(
             challenger_fair,
             [adaptive_fair],
             minimum_relative_improvement=(config.fair_coverage.minimum_relative_improvement),
-            require_30_line_optimum=config.fair_coverage.require_global_optimum,
+            require_line_optimum=(
+                config.bundle.size if config.fair_coverage.require_global_optimum else None
+            ),
             non_regression_references=([incumbent_fair] if incumbent_fair is not None else []),
         )
         challenger_model_metrics = estimate_bundle_metrics(
@@ -334,16 +344,12 @@ def build_locked_bundle(
             fair_uniform_exact=challenger_fair,
         )
         fair_evidence = FairCoverageChallengerEvidence(
-            evidence_version=3,
+            evidence_version=4,
             selection_policy=config.fair_coverage.selection_policy,
             model_skill_status=config.fair_coverage.model_skill_status,
             selected=fair_selected,
-            global_optimum_certified=(
-                challenger_fair.covered_ge_3_mains_count == OPTIMAL_30_LINE_GE3_COUNT
-                and challenger_fair.covered_ge_4_mains_count == OPTIMAL_30_LINE_GE4_COUNT
-                and challenger_fair.covered_3_plus_mega_count == OPTIMAL_30_LINE_3_PLUS_MEGA_COUNT
-                and challenger_fair.covered_jackpot_count == 30
-            ),
+            global_optimum_certified=challenger_certified,
+            certificate_bundle_size=config.bundle.size,
             selection_reason=(
                 f"{promotion_decision.reason}; selected under explicit fair-null robustness "
                 "because fitted-model predictive skill remains unvalidated"
@@ -578,9 +584,9 @@ def build_locked_bundle(
     _assert_correction_non_regression(final_fair_metrics, incumbent_fair)
     optimizer_settings = OptimizerSettings(
         algorithm=(
-            "exact-fair-linear-packing-v4"
+            FAIR_OPTIMIZER_ALGORITHM_VERSION
             if fair_selected
-            else "simulation-greedy-submodular-v4-fair-robustness-evaluated"
+            else ADAPTIVE_OPTIMIZER_ALGORITHM_VERSION
         ),
         optimization_basis=(
             "exact_fair_uniform_coverage" if fair_selected else "adaptive_model_simulation"

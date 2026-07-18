@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
+from itertools import combinations, islice
 
 import pytest
+from pydantic import ValidationError
 
 import slp_model.scoring as scoring
 from slp_model.exceptions import IntegrityError
 from slp_model.models import (
     BundleMetadata,
+    BundleScore,
     LockedBundle,
     LockedLine,
     OptimizerSettings,
@@ -18,6 +21,7 @@ from slp_model.models import (
     VerificationMetadata,
     VerifiedDraw,
 )
+from slp_model.reporting import _markdown, build_performance_report
 from slp_model.scoring import TicketScore, category, score_locked_bundle, score_ticket
 
 
@@ -98,6 +102,8 @@ def _bundle(
     first_mega: int = 8,
     p_ge_3: float = 0.25,
     p_ge_4: float = 0.05,
+    bundle_size: int = 3,
+    model_version: str = "scoring-test-v1",
 ) -> LockedBundle:
     history_date = _previous_draw_date(target)
     history_verification = _verified_draw(history_date).verification
@@ -108,7 +114,7 @@ def _bundle(
             generated_timestamp_utc=generated,
             intended_draw_date=target,
             game_rules_version="slp-5of47-mega-1of27-v1",
-            model_version="scoring-test-v1",
+            model_version=model_version,
             configuration_snapshot={"fixture": True},
             configuration_sha256="d" * 64,
             random_seed=17,
@@ -134,9 +140,15 @@ def _bundle(
                 constraints={"max_overlap": 3},
                 anti_cannibalization_weight=0.1,
             ),
-            bundle_size=3,
+            bundle_size=bundle_size,
         ),
-        lines=(
+        lines=_locked_lines(bundle_size, first_mega=first_mega),
+    )
+
+
+def _locked_lines(bundle_size: int, *, first_mega: int) -> tuple[LockedLine, ...]:
+    if bundle_size == 3:
+        return (
             LockedLine(
                 strategy="aggressive",
                 line_id=1,
@@ -145,8 +157,23 @@ def _bundle(
             ),
             LockedLine(strategy="balanced", line_id=1, mains=(6, 7, 8, 9, 10), mega=9),
             LockedLine(strategy="conservative", line_id=1, mains=(11, 12, 13, 14, 15), mega=10),
-        ),
-    )
+        )
+    if bundle_size % 3:
+        raise ValueError("fixture bundle_size must support equal tiers")
+    per_tier = bundle_size // 3
+    mains_sets = iter(islice(combinations(range(1, 48), 5), bundle_size))
+    lines: list[LockedLine] = []
+    for strategy in ("aggressive", "balanced", "conservative"):
+        for line_id in range(1, per_tier + 1):
+            lines.append(
+                LockedLine(
+                    strategy=strategy,
+                    line_id=line_id,
+                    mains=next(mains_sets),
+                    mega=((len(lines) + first_mega - 1) % 27) + 1,
+                )
+            )
+    return tuple(lines)
 
 
 def _score(
@@ -156,6 +183,8 @@ def _score(
     first_mega: int = 8,
     p_ge_3: float = 0.25,
     p_ge_4: float = 0.05,
+    bundle_size: int = 3,
+    model_version: str = "scoring-test-v1",
 ):
     return score_locked_bundle(
         _bundle(
@@ -164,6 +193,8 @@ def _score(
             first_mega=first_mega,
             p_ge_3=p_ge_3,
             p_ge_4=p_ge_4,
+            bundle_size=bundle_size,
+            model_version=model_version,
         ),
         _verified_draw(target),
         scored_timestamp_utc=_post_timestamp(target) + timedelta(minutes=15),
@@ -258,6 +289,120 @@ def test_chronological_previous_scores_feed_rolling_calibration() -> None:
     )
 
     assert current.calibration_error["rolling_5_calibration_p_ge_3"] == pytest.approx(0.6)
+
+
+def test_score_persists_locked_bundle_regime_provenance() -> None:
+    score = _score(
+        date(2026, 1, 3),
+        "bundle-sixty-provenance",
+        bundle_size=60,
+        model_version="model-v5",
+    )
+
+    assert score.bundle_size == 60
+    assert score.model_version == "model-v5"
+    assert score.calibration_error["regime_bundle_size"] == 60.0
+
+
+def test_rolling_calibration_excludes_other_bundle_size_and_model_regimes() -> None:
+    old_thirty = _score(
+        date(2026, 1, 3),
+        "bundle-old-thirty",
+        p_ge_3=0.2,
+        bundle_size=30,
+        model_version="model-v4",
+    )
+    same_size_old_model = _score(
+        date(2026, 1, 7),
+        "bundle-sixty-old-model",
+        p_ge_3=0.3,
+        bundle_size=60,
+        model_version="model-v4",
+    )
+    same_regime = _score(
+        date(2026, 1, 10),
+        "bundle-sixty-same-regime",
+        p_ge_3=0.4,
+        bundle_size=60,
+        model_version="model-v5",
+    )
+    target = date(2026, 1, 17)
+
+    current = score_locked_bundle(
+        _bundle(
+            target,
+            "bundle-current-sixty",
+            p_ge_3=0.6,
+            bundle_size=60,
+            model_version="model-v5",
+        ),
+        _verified_draw(target),
+        previous_scores=(old_thirty, same_size_old_model, same_regime),
+        scored_timestamp_utc=_post_timestamp(target) + timedelta(minutes=15),
+    )
+
+    assert current.calibration_error["regime_prior_score_count"] == 1.0
+    assert current.calibration_error["regime_excluded_score_count"] == 2.0
+    assert current.calibration_error["rolling_5_calibration_p_ge_3"] == pytest.approx(0.5)
+
+
+def test_legacy_score_loading_derives_size_and_marks_model_unknown() -> None:
+    current = _score(date(2026, 1, 3), "bundle-legacy-score")
+    payload = current.model_dump(mode="json")
+    payload.pop("bundle_size")
+    payload.pop("model_version")
+
+    legacy = BundleScore.model_validate(payload)
+
+    assert legacy.bundle_size is None
+    assert legacy.model_version == "unknown"
+
+
+def test_score_rejects_bundle_size_that_disagrees_with_lines() -> None:
+    payload = _score(date(2026, 1, 3), "bundle-size-mismatch").model_dump(mode="json")
+    payload["bundle_size"] = 60
+
+    with pytest.raises(ValidationError, match="does not match scored line count"):
+        BundleScore.model_validate(payload)
+
+
+def test_performance_report_separates_legacy_thirty_and_new_sixty_regimes() -> None:
+    thirty = _score(
+        date(2026, 1, 3),
+        "bundle-report-thirty",
+        bundle_size=30,
+        model_version="model-v4",
+    )
+    legacy_payload = thirty.model_dump(mode="json")
+    legacy_payload.pop("bundle_size")
+    legacy_payload.pop("model_version")
+    legacy_thirty = BundleScore.model_validate(legacy_payload)
+    sixty = _score(
+        date(2026, 1, 7),
+        "bundle-report-sixty",
+        bundle_size=60,
+        model_version="model-v5",
+    )
+
+    report = build_performance_report((sixty, legacy_thirty))
+
+    assert report["schema_version"] == 3
+    assert report["mixed_regimes"] is True
+    assert report["regime_count"] == 2
+    assert [regime["regime_id"] for regime in report["regimes"]] == [
+        "30-line::unknown",
+        "60-line::model-v5",
+    ]
+    assert report["regimes"][0]["provenance_complete"] is False
+    assert report["regimes"][1]["provenance_complete"] is True
+    assert report["latest_calibration_regime_id"] == "60-line::model-v5"
+    assert report["predicted_vs_realized"][0]["bundle_size"] == 30
+    assert report["best_performing_tickets"][0]["regime_id"] in {
+        "30-line::unknown",
+        "60-line::model-v5",
+    }
+    assert "`30-line::unknown`" in _markdown(report)
+    assert "`60-line::model-v5`" in _markdown(report)
 
 
 def test_previous_scores_reject_duplicate_bundle_id() -> None:
