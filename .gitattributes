@@ -1,0 +1,2 @@
+reports/**/*.md whitespace=-blank-at-eof
+data/legacy/**/*.csv -text whitespace=-trailing-space
