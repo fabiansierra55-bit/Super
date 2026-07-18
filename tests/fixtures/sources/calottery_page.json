@@ -1,0 +1,36 @@
+{
+  "DrawGameId": 8,
+  "Name": "SuperLotto Plus",
+  "NextDraw": {
+    "DrawNumber": 4100,
+    "DrawDate": "2026-07-18T07:00:00",
+    "WinningNumbers": {}
+  },
+  "TotalPreviousDraws": 4099,
+  "PreviousDraws": [
+    {
+      "DrawNumber": 4099,
+      "DrawDate": "2026-07-15T07:00:00",
+      "WinningNumbers": {
+        "0": {"Number": "2", "IsSpecial": false, "Name": null},
+        "1": {"Number": "5", "IsSpecial": false, "Name": null},
+        "2": {"Number": "34", "IsSpecial": false, "Name": null},
+        "3": {"Number": "36", "IsSpecial": false, "Name": null},
+        "4": {"Number": "37", "IsSpecial": false, "Name": null},
+        "5": {"Number": "3", "IsSpecial": true, "Name": null}
+      }
+    },
+    {
+      "DrawNumber": 4098,
+      "DrawDate": "2026-07-11T07:00:00",
+      "WinningNumbers": {
+        "0": {"Number": "1", "IsSpecial": false, "Name": null},
+        "1": {"Number": "4", "IsSpecial": false, "Name": null},
+        "2": {"Number": "21", "IsSpecial": false, "Name": null},
+        "3": {"Number": "36", "IsSpecial": false, "Name": null},
+        "4": {"Number": "44", "IsSpecial": false, "Name": null},
+        "5": {"Number": "20", "IsSpecial": true, "Name": null}
+      }
+    }
+  ]
+}

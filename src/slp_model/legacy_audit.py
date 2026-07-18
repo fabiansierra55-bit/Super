@@ -20,10 +20,11 @@ import io
 import json
 import re
 from collections import Counter, defaultdict
-from datetime import date, datetime, timezone
+from collections.abc import Iterable, Mapping, Sequence
+from datetime import UTC, date, datetime
 from itertools import combinations
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -86,18 +87,13 @@ EMBEDDED_TWO_SOURCE_VERIFICATIONS: dict[str, dict[str, Any]] = {
             {
                 "role": "official",
                 "name": "California Lottery",
-                "url": (
-                    "https://www.calottery.com/api/DrawGameApi/"
-                    "DrawGamePastDrawResults/8/5/20"
-                ),
+                "url": ("https://www.calottery.com/api/DrawGameApi/DrawGamePastDrawResults/8/5/20"),
                 "fetch_timestamp_utc": "2026-07-17T23:11:25Z",
             },
             {
                 "role": "backup",
                 "name": "Lottery.net",
-                "url": (
-                    "https://www.lottery.net/california/superlotto-plus/numbers/2025"
-                ),
+                "url": ("https://www.lottery.net/california/superlotto-plus/numbers/2025"),
                 "fetch_timestamp_utc": "2026-07-17T23:11:27Z",
             },
         ],
@@ -111,18 +107,13 @@ EMBEDDED_TWO_SOURCE_VERIFICATIONS: dict[str, dict[str, Any]] = {
             {
                 "role": "official",
                 "name": "California Lottery",
-                "url": (
-                    "https://www.calottery.com/api/DrawGameApi/"
-                    "DrawGamePastDrawResults/8/5/20"
-                ),
+                "url": ("https://www.calottery.com/api/DrawGameApi/DrawGamePastDrawResults/8/5/20"),
                 "fetch_timestamp_utc": "2026-07-17T23:11:25Z",
             },
             {
                 "role": "backup",
                 "name": "Lottery.net",
-                "url": (
-                    "https://www.lottery.net/california/superlotto-plus/numbers/2025"
-                ),
+                "url": ("https://www.lottery.net/california/superlotto-plus/numbers/2025"),
                 "fetch_timestamp_utc": "2026-07-17T23:11:27Z",
             },
         ],
@@ -136,10 +127,7 @@ EMBEDDED_TWO_SOURCE_VERIFICATIONS: dict[str, dict[str, Any]] = {
             {
                 "role": "official",
                 "name": "California Lottery",
-                "url": (
-                    "https://www.calottery.com/api/DrawGameApi/"
-                    "DrawGamePastDrawResults/8/3/20"
-                ),
+                "url": ("https://www.calottery.com/api/DrawGameApi/DrawGamePastDrawResults/8/3/20"),
                 "fetch_timestamp_utc": "2026-07-17T23:11:40Z",
             },
             {
@@ -159,10 +147,7 @@ EMBEDDED_TWO_SOURCE_VERIFICATIONS: dict[str, dict[str, Any]] = {
             {
                 "role": "official",
                 "name": "California Lottery",
-                "url": (
-                    "https://www.calottery.com/api/DrawGameApi/"
-                    "DrawGamePastDrawResults/8/3/20"
-                ),
+                "url": ("https://www.calottery.com/api/DrawGameApi/DrawGamePastDrawResults/8/3/20"),
                 "fetch_timestamp_utc": "2026-07-17T23:11:40Z",
             },
             {
@@ -197,9 +182,7 @@ def _is_two_source_evidence(evidence: Mapping[str, Any]) -> bool:
         return host == expected or host.endswith(f".{expected}")
 
     def has_utc_fetch_time(source: Mapping[str, Any]) -> bool:
-        parsed, timestamp_format = _parse_utc_timestamp(
-            str(source.get("fetch_timestamp_utc", ""))
-        )
+        parsed, timestamp_format = _parse_utc_timestamp(str(source.get("fetch_timestamp_utc", "")))
         return parsed is not None and timestamp_format == "iso8601"
 
     sources = evidence.get("sources")
@@ -274,14 +257,12 @@ def _parse_utc_timestamp(value: str | None) -> tuple[datetime | None, str]:
     cleaned = value.strip()
     try:
         if re.fullmatch(r"\d{8}_\d{6}Z", cleaned):
-            parsed = datetime.strptime(cleaned, "%Y%m%d_%H%M%SZ").replace(
-                tzinfo=timezone.utc
-            )
+            parsed = datetime.strptime(cleaned, "%Y%m%d_%H%M%SZ").replace(tzinfo=UTC)
             return parsed, "legacy_compact"
         parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             return None, "timezone_missing"
-        return parsed.astimezone(timezone.utc), "iso8601"
+        return parsed.astimezone(UTC), "iso8601"
     except ValueError:
         return None, "invalid"
 
@@ -367,12 +348,13 @@ class _AuditBuilder:
         if related:
             finding["related_paths"] = related
         digest = hashlib.sha256(_canonical_json(finding).encode()).hexdigest()[:16]
-        finding["finding_id"] = f"{code}:{digest}"
+        finding_id = f"{code}:{digest}"
+        finding["finding_id"] = finding_id
         self.findings.append(finding)
-        self.file_findings[path].append(finding["finding_id"])
+        self.file_findings[path].append(finding_id)
         for related_path in related:
-            self.file_findings[related_path].append(finding["finding_id"])
-        return finding["finding_id"]
+            self.file_findings[related_path].append(finding_id)
+        return finding_id
 
 
 def _read_csv(
@@ -416,9 +398,7 @@ def _read_csv(
         return [], [], raw
 
     headers = parsed[0]
-    duplicate_headers = sorted(
-        header for header, count in Counter(headers).items() if count > 1
-    )
+    duplicate_headers = sorted(header for header, count in Counter(headers).items() if count > 1)
     if duplicate_headers:
         builder.add(
             code="duplicate_csv_headers",
@@ -496,10 +476,7 @@ def _check_schema(
                 message="Prediction cannot be treated as a production locked bundle.",
                 evidence={"missing_fields": sorted(missing_identity)},
             )
-        if (
-            "timestamp_utc" in header_set
-            and "generated_timestamp_utc" not in header_set
-        ):
+        if "timestamp_utc" in header_set and "generated_timestamp_utc" not in header_set:
             builder.add(
                 code="legacy_generation_timestamp_field",
                 severity="warning",
@@ -510,9 +487,7 @@ def _check_schema(
                 ),
                 evidence={"legacy_field": "timestamp_utc"},
             )
-        missing_reproducibility = sorted(
-            set(PREDICTION_REPRODUCIBILITY_FIELDS) - header_set
-        )
+        missing_reproducibility = sorted(set(PREDICTION_REPRODUCIBILITY_FIELDS) - header_set)
         if missing_reproducibility:
             builder.add(
                 code="missing_prediction_reproducibility_metadata",
@@ -594,9 +569,7 @@ def _extract_tickets(
             continue
         typed_mains = tuple(int(value) for value in mains if value is not None)
         if not all(1 <= value <= 47 for value in typed_mains) or not 1 <= mega <= 27:
-            bad_ranges.append(
-                {"row": row_number, "mains": list(typed_mains), "mega": mega}
-            )
+            bad_ranges.append({"row": row_number, "mains": list(typed_mains), "mega": mega})
         if len(set(typed_mains)) != 5:
             repeated_mains.append({"row": row_number, "mains": list(typed_mains)})
         if tuple(sorted(typed_mains)) != typed_mains:
@@ -658,9 +631,7 @@ def _duplicate_groups(
     for ticket in tickets:
         grouped[tuple(ticket[field] for field in key_fields)].append(ticket["row"])
     return [
-        {"value": list(key), "rows": rows}
-        for key, rows in sorted(grouped.items())
-        if len(rows) > 1
+        {"value": list(key), "rows": rows} for key, rows in sorted(grouped.items()) if len(rows) > 1
     ]
 
 
@@ -734,9 +705,7 @@ def _check_bundle_constraints(
             )
         )
         if distance < 2:
-            hamming.append(
-                {"rows": [first["row"], second["row"]], "distance": distance}
-            )
+            hamming.append({"rows": [first["row"], second["row"]], "distance": distance})
 
     pair_violations: list[JsonObject] = [
         {"pair": list(pair), "count": len(rows), "rows": rows}
@@ -792,31 +761,21 @@ def _check_bundle_constraints(
 
     ticket_count = len(tickets)
     positional_counts = [
-        Counter(ticket["mains"][position] for ticket in tickets)
-        for position in range(5)
+        Counter(ticket["mains"][position] for ticket in tickets) for position in range(5)
     ]
     max_position_share = max(
-        (
-            max(counter.values(), default=0) / ticket_count
-            for counter in positional_counts
-        ),
+        (max(counter.values(), default=0) / ticket_count for counter in positional_counts),
         default=0.0,
     )
-    max_main_share = (
-        max(main_counts.values(), default=0) / ticket_count if ticket_count else 0
-    )
+    max_main_share = max(main_counts.values(), default=0) / ticket_count if ticket_count else 0
     return {
         "ticket_count": ticket_count,
         "unique_mains_used": len(main_counts),
         "max_main_ticket_share": round(max_main_share, 6),
         "max_sorted_position_share": round(max_position_share, 6),
-        "maximum_pair_count": max(
-            (len(rows) for rows in pair_rows.values()), default=0
-        ),
+        "maximum_pair_count": max((len(rows) for rows in pair_rows.values()), default=0),
         "violating_pair_count": len(pair_violations),
-        "maximum_triple_count": max(
-            (len(rows) for rows in triple_rows.values()), default=0
-        ),
+        "maximum_triple_count": max((len(rows) for rows in triple_rows.values()), default=0),
         "violating_triple_count": len(triple_violations),
         "overlap_violation_count": len(overlaps),
         "hamming_violation_count": len(hamming),
@@ -892,9 +851,7 @@ def _check_prediction_metadata_values(
         context[f"_{field}"] = value
 
     timestamp_field = (
-        "generated_timestamp_utc"
-        if "generated_timestamp_utc" in headers
-        else "timestamp_utc"
+        "generated_timestamp_utc" if "generated_timestamp_utc" in headers else "timestamp_utc"
     )
     timestamp_value = context.get(f"_{timestamp_field}")
     generated_at, timestamp_format = _parse_utc_timestamp(timestamp_value)
@@ -926,9 +883,7 @@ def _check_prediction_metadata_values(
             message="intended_draw_date is not an ISO calendar date.",
             evidence={"value": explicit_draw_value},
         )
-    filename_date, filename_basis = _filename_claimed_date(
-        context["_absolute_path"], "prediction"
-    )
+    filename_date, filename_basis = _filename_claimed_date(context["_absolute_path"], "prediction")
     intended_date = explicit_draw_date or filename_date
     intended_basis = "intended_draw_date" if explicit_draw_date else filename_basis
     context["_intended_date"] = intended_date
@@ -947,8 +902,7 @@ def _check_prediction_metadata_values(
                     "generated_date_pacific": generated_pacific.date().isoformat(),
                     "intended_draw_date": intended_date.isoformat(),
                     "intended_date_basis": intended_basis,
-                    "basis_is_explicit_metadata": intended_basis
-                    == "intended_draw_date",
+                    "basis_is_explicit_metadata": intended_basis == "intended_draw_date",
                 },
                 verification_status=(
                     "verified_from_artifact"
@@ -1111,12 +1065,8 @@ def _check_scoring(
             message="Scoring rows disagree on draw_date.",
             evidence={"observed_values": observed_draws},
         )
-    filename_date, filename_basis = _filename_claimed_date(
-        context["_absolute_path"], "scoring"
-    )
-    context["_draw_date"] = draw_value or (
-        filename_date.isoformat() if filename_date else None
-    )
+    filename_date, filename_basis = _filename_claimed_date(context["_absolute_path"], "scoring")
+    context["_draw_date"] = draw_value or (filename_date.isoformat() if filename_date else None)
     context["_draw_date_basis"] = "draw_date" if draw_value else filename_basis
 
     bundle_value, bundle_values = _uniform_value(rows, "bundle_id")
@@ -1169,9 +1119,7 @@ def _check_scoring(
                     "computed": mega_hit,
                 }
             )
-        matched_field = (
-            "matched_mains" if "matched_mains" in headers else "matched_nums"
-        )
+        matched_field = "matched_mains" if "matched_mains" in headers else "matched_nums"
         if matched_field in headers:
             recorded_numbers = tuple(
                 int(value) for value in re.findall(r"\d+", row.get(matched_field, ""))
@@ -1237,18 +1185,14 @@ def _check_scoring(
     }
 
 
-def _signature(
-    ticket: Mapping[str, Any], *, include_identity: bool = True
-) -> tuple[Any, ...]:
+def _signature(ticket: Mapping[str, Any], *, include_identity: bool = True) -> tuple[Any, ...]:
     prefix: tuple[Any, ...] = ()
     if include_identity:
         prefix = (ticket["strategy"], ticket["line_id"])
     return (*prefix, *ticket["mains"], ticket["mega"])
 
 
-def _check_associations(
-    contexts: Sequence[JsonObject], builder: _AuditBuilder
-) -> list[JsonObject]:
+def _check_associations(contexts: Sequence[JsonObject], builder: _AuditBuilder) -> list[JsonObject]:
     predictions = [context for context in contexts if context["kind"] == "prediction"]
     scoring = [context for context in contexts if context["kind"] == "scoring"]
     associations: list[JsonObject] = []
@@ -1297,27 +1241,19 @@ def _check_associations(
         score_counter = Counter(_signature(ticket) for ticket in score_tickets)
         comparisons: list[tuple[int, str, JsonObject]] = []
         for prediction in predictions:
-            prediction_counter = Counter(
-                _signature(ticket) for ticket in prediction["_tickets"]
-            )
+            prediction_counter = Counter(_signature(ticket) for ticket in prediction["_tickets"])
             common = sum((score_counter & prediction_counter).values())
             comparisons.append((common, prediction["path"], prediction))
         comparisons.sort(key=lambda item: (-item[0], item[1]))
         best_count, _, best = comparisons[0] if comparisons else (0, "", None)
         exact = bool(
-            best
-            and best_count == len(score_tickets)
-            and best_count == len(best["_tickets"])
+            best and best_count == len(score_tickets) and best_count == len(best["_tickets"])
         )
         partial_threshold = max(2, min(len(score_tickets), 30) // 2)
         status = (
             "exact_content_match"
             if exact
-            else (
-                "partial_content_match"
-                if best_count >= partial_threshold
-                else "no_match"
-            )
+            else ("partial_content_match" if best_count >= partial_threshold else "no_match")
         )
         association: JsonObject = {
             "scoring_path": score["path"],
@@ -1331,9 +1267,7 @@ def _check_associations(
             "prediction_rows": len(best["_tickets"]) if best else None,
         }
         if best:
-            remaining_prediction = Counter(
-                _signature(ticket) for ticket in best["_tickets"]
-            )
+            remaining_prediction = Counter(_signature(ticket) for ticket in best["_tickets"])
             unmatched_scoring_rows: list[int] = []
             for ticket in score_tickets:
                 signature = _signature(ticket)
@@ -1424,42 +1358,31 @@ def _check_corrected_variants(
         if "corrected" not in corrected["_absolute_path"].name.lower():
             continue
         corrected_counter = Counter(
-            _signature(ticket, include_identity=False)
-            for ticket in corrected["_tickets"]
+            _signature(ticket, include_identity=False) for ticket in corrected["_tickets"]
         )
         candidates: list[tuple[int, str, JsonObject]] = []
         for candidate in predictions:
             if candidate is corrected:
                 continue
             candidate_counter = Counter(
-                _signature(ticket, include_identity=False)
-                for ticket in candidate["_tickets"]
+                _signature(ticket, include_identity=False) for ticket in candidate["_tickets"]
             )
             common = sum((corrected_counter & candidate_counter).values())
             candidates.append((common, candidate["path"], candidate))
         candidates.sort(key=lambda item: (-item[0], item[1]))
         shared, _, parent = candidates[0] if candidates else (0, "", None)
         parent_counter = (
-            Counter(
-                _signature(ticket, include_identity=False)
-                for ticket in parent["_tickets"]
-            )
+            Counter(_signature(ticket, include_identity=False) for ticket in parent["_tickets"])
             if parent
             else Counter()
         )
         removed = sorted((parent_counter - corrected_counter).elements())
         added = sorted((corrected_counter - parent_counter).elements())
-        corrected_identity_counter = Counter(
-            _signature(ticket) for ticket in corrected["_tickets"]
-        )
+        corrected_identity_counter = Counter(_signature(ticket) for ticket in corrected["_tickets"])
         parent_identity_counter = (
-            Counter(_signature(ticket) for ticket in parent["_tickets"])
-            if parent
-            else Counter()
+            Counter(_signature(ticket) for ticket in parent["_tickets"]) if parent else Counter()
         )
-        shared_identity = sum(
-            (corrected_identity_counter & parent_identity_counter).values()
-        )
+        shared_identity = sum((corrected_identity_counter & parent_identity_counter).values())
         record: JsonObject = {
             "corrected_path": corrected["path"],
             "nearest_original_path": parent["path"] if parent else None,
@@ -1515,9 +1438,7 @@ def audit_legacy_tree(
         kind = _artifact_kind(absolute_path)
         headers, rows, raw = _read_csv(absolute_path, display_path, kind, builder)
         _check_schema(kind=kind, headers=headers, path=display_path, builder=builder)
-        tickets = _extract_tickets(
-            headers=headers, rows=rows, path=display_path, builder=builder
-        )
+        tickets = _extract_tickets(headers=headers, rows=rows, path=display_path, builder=builder)
         if tickets:
             _check_ticket_identity(tickets=tickets, path=display_path, builder=builder)
             constraint_metrics = _check_bundle_constraints(
@@ -1585,8 +1506,7 @@ def audit_legacy_tree(
     verified_claims = sum(
         1
         for context in contexts
-        if context.get("result_claim", {}).get("verification_status")
-        == "verified_two_source"
+        if context.get("result_claim", {}).get("verification_status") == "verified_two_source"
     )
     unverified_claims = sum(
         1
@@ -1595,9 +1515,7 @@ def audit_legacy_tree(
     )
 
     try:
-        displayed_root = (
-            input_path.resolve().relative_to(repo_path.resolve()).as_posix()
-        )
+        displayed_root = input_path.resolve().relative_to(repo_path.resolve()).as_posix()
     except ValueError:
         displayed_root = input_path.name
     return {
@@ -1645,14 +1563,10 @@ def audit_legacy_tree(
             "finding_code_counts": dict(sorted(code_counts.items())),
             "verified_winning_result_claims": verified_claims,
             "unverified_winning_result_claims": unverified_claims,
-            "winning_result_mismatches": code_counts[
-                "winning_result_mismatch_against_two_sources"
-            ],
+            "winning_result_mismatches": code_counts["winning_result_mismatch_against_two_sources"],
             "internal_scoring_inconsistency_findings": scoring_inconsistency_count,
             "invalid_range_findings": code_counts["invalid_number_range"],
-            "duplicate_bundle_id_findings": code_counts[
-                "duplicate_bundle_id_across_predictions"
-            ],
+            "duplicate_bundle_id_findings": code_counts["duplicate_bundle_id_across_predictions"],
             "duplicate_main_set_findings": code_counts["duplicate_main_set"],
             "overlap_cap_findings": code_counts["main_overlap_cap_violation"],
             "corrections_applied": 0,
@@ -1664,6 +1578,87 @@ def audit_legacy_tree(
         "findings": sorted_findings,
         "corrections": [],
         "reconciled_records": [],
+    }
+
+
+def verify_legacy_inventory(
+    manifest_path: Path | str,
+    *,
+    repository_root: Path | str | None = None,
+) -> JsonObject:
+    """Re-hash every preserved legacy CSV against its reconciled manifest.
+
+    The historical audit is useful only while its immutable inputs remain the
+    exact bytes that were reviewed.  This verifier also checks for removed or
+    newly introduced CSVs so a stale manifest cannot silently bless a changed
+    legacy tree.
+    """
+
+    root = Path(repository_root or Path.cwd()).resolve()
+    manifest_file = Path(manifest_path)
+    if not manifest_file.is_absolute():
+        manifest_file = root / manifest_file
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read legacy audit manifest: {manifest_file}") from exc
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), list):
+        raise ValueError("legacy audit manifest has an invalid files inventory")
+    input_root_value = manifest.get("input_root")
+    if not isinstance(input_root_value, str) or not input_root_value:
+        raise ValueError("legacy audit manifest has no input_root")
+    input_root = (root / input_root_value).resolve()
+    if input_root != root and root not in input_root.parents:
+        raise ValueError("legacy audit input_root escapes the repository")
+
+    records: dict[str, Mapping[str, Any]] = {}
+    observed: list[tuple[str, str, int]] = []
+    for raw_record in manifest["files"]:
+        if not isinstance(raw_record, dict):
+            raise ValueError("legacy audit manifest contains a non-object file record")
+        path_value = raw_record.get("path")
+        if not isinstance(path_value, str) or path_value in records:
+            raise ValueError("legacy audit manifest contains an invalid or duplicate path")
+        candidate = (root / path_value).resolve()
+        if candidate != input_root and input_root not in candidate.parents:
+            raise ValueError(f"legacy inventory path escapes input_root: {path_value}")
+        if not candidate.is_file():
+            raise ValueError(f"legacy inventory file is missing: {path_value}")
+        payload = candidate.read_bytes()
+        digest = _sha256_bytes(payload)
+        expected_digest = raw_record.get("sha256")
+        expected_size = raw_record.get("byte_size")
+        if digest != expected_digest or len(payload) != expected_size:
+            raise ValueError(f"legacy inventory checksum mismatch: {path_value}")
+        records[path_value] = raw_record
+        observed.append((path_value, digest, len(payload)))
+
+    actual_paths = {
+        path.resolve().relative_to(root).as_posix() for path in input_root.rglob("*.csv")
+    }
+    expected_paths = set(records)
+    if missing := sorted(expected_paths - actual_paths):
+        raise ValueError(f"legacy inventory files disappeared: {', '.join(missing)}")
+    if additions := sorted(actual_paths - expected_paths):
+        raise ValueError(f"unmanifested legacy CSV files detected: {', '.join(additions)}")
+    observed.sort(key=lambda item: item[0])
+    inventory_material = "".join(
+        f"{path}\0{digest}\0{size}\n" for path, digest, size in observed
+    ).encode()
+    inventory_sha256 = _sha256_bytes(inventory_material)
+    source_integrity = manifest.get("source_integrity")
+    if not isinstance(source_integrity, dict):
+        raise ValueError("legacy audit manifest has no source_integrity record")
+    if source_integrity.get("inventory_sha256") != inventory_sha256:
+        raise ValueError("legacy inventory aggregate checksum mismatch")
+    if source_integrity.get("file_count") != len(observed):
+        raise ValueError("legacy inventory file count mismatch")
+    return {
+        "status": "verified",
+        "manifest": manifest_file.relative_to(root).as_posix(),
+        "input_root": input_root.relative_to(root).as_posix(),
+        "file_count": len(observed),
+        "inventory_sha256": inventory_sha256,
     }
 
 
@@ -1733,15 +1728,8 @@ def render_human_report(manifest: Mapping[str, Any]) -> str:
         }
     ]
     for finding in material:
-        row_text = (
-            f" (CSV rows {', '.join(map(str, finding['rows']))})"
-            if finding["rows"]
-            else ""
-        )
-        lines.append(
-            f"- `{finding['code']}` — `{finding['path']}`{row_text}: "
-            f"{finding['message']}"
-        )
+        row_text = f" (CSV rows {', '.join(map(str, finding['rows']))})" if finding["rows"] else ""
+        lines.append(f"- `{finding['code']}` — `{finding['path']}`{row_text}: {finding['message']}")
     if not material:
         lines.append("- No critical or error findings.")
 
@@ -1806,10 +1794,7 @@ def render_human_report(manifest: Mapping[str, Any]) -> str:
                 "superlotto-plus/numbers/2025>"
             ),
             "",
-            (
-                "Approved backup: <https://www.lotteryusa.com/california/"
-                "super-lotto-plus/year>"
-            ),
+            ("Approved backup: <https://www.lotteryusa.com/california/super-lotto-plus/year>"),
             "",
             "For the two files without embedded winners, recomputation used the "
             "stored two-source observations above. The audit never infers a winning "
@@ -1823,8 +1808,7 @@ def render_human_report(manifest: Mapping[str, Any]) -> str:
     )
     for item in manifest["files"]:
         lines.append(
-            f"| `{item['path']}` | {item['row_count']} | {item['byte_size']} | "
-            f"`{item['sha256']}` |"
+            f"| `{item['path']}` | {item['row_count']} | {item['byte_size']} | `{item['sha256']}` |"
         )
 
     lines.extend(
@@ -1908,9 +1892,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     evidence = (
-        EMBEDDED_TWO_SOURCE_VERIFICATIONS
-        if args.use_embedded_two_source_verifications
-        else None
+        EMBEDDED_TWO_SOURCE_VERIFICATIONS if args.use_embedded_two_source_verifications else None
     )
     write_audit_outputs(
         args.input_root,

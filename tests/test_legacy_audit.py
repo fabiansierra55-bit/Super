@@ -10,6 +10,7 @@ from slp_model.legacy_audit import (
     EMBEDDED_TWO_SOURCE_VERIFICATIONS,
     audit_legacy_tree,
     render_human_report,
+    verify_legacy_inventory,
     write_audit_outputs,
 )
 
@@ -77,9 +78,7 @@ def test_handoff_identifies_material_legacy_failures() -> None:
     assert "untracked_corrected_variant" in codes
     assert "likely_recenter_collapse" in codes
 
-    associations = {
-        Path(item["scoring_path"]).name: item for item in manifest["associations"]
-    }
+    associations = {Path(item["scoring_path"]).name: item for item in manifest["associations"]}
     partial = associations["slp_scoring_20250924.csv"]
     assert partial["status"] == "partial_content_match"
     assert partial["matching_rows"] == 23
@@ -264,3 +263,33 @@ def test_writes_outputs_without_mutating_inputs(tmp_path: Path) -> None:
             report_path,
             repository_root=tmp_path,
         )
+
+
+def test_legacy_inventory_rehash_detects_tampering_and_additions(tmp_path: Path) -> None:
+    legacy = tmp_path / "legacy"
+    history = legacy / "history" / "history_schema.csv"
+    _write_csv(history, ["draw_date", "n1", "n2", "n3", "n4", "n5", "mega"], [])
+    manifest_path = tmp_path / "reconciled" / "manifest.json"
+    write_audit_outputs(
+        legacy,
+        manifest_path,
+        tmp_path / "docs" / "report.md",
+        repository_root=tmp_path,
+    )
+
+    verified = verify_legacy_inventory(manifest_path, repository_root=tmp_path)
+    assert verified["status"] == "verified"
+    assert verified["file_count"] == 1
+
+    history.write_bytes(history.read_bytes() + b"tampered")
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        verify_legacy_inventory(manifest_path, repository_root=tmp_path)
+
+    history.write_bytes(history.read_bytes()[: -len(b"tampered")])
+    _write_csv(
+        legacy / "history" / "untracked.csv",
+        ["draw_date", "n1", "n2", "n3", "n4", "n5", "mega"],
+        [],
+    )
+    with pytest.raises(ValueError, match="unmanifested"):
+        verify_legacy_inventory(manifest_path, repository_root=tmp_path)

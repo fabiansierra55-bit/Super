@@ -6,35 +6,113 @@
     "main_count": 5,
     "mega_min": 1,
     "mega_max": 27,
-    "draw_timezone": "America/Los_Angeles"
+    "draw_timezone": "America/Los_Angeles",
+    "draw_weekdays": [2, 5],
+    "official_post_time_pacific": "20:00:00",
+    "rules_version": "slp-5of47-mega-1of27-v1"
+  },
+  "sources": {
+    "endpoints": [
+      {
+        "name": "california_lottery",
+        "url": "https://www.calottery.com/draw-games/superlotto-plus",
+        "role": "official",
+        "enabled": true
+      },
+      {
+        "name": "lotteryusa",
+        "url": "https://www.lotteryusa.com/california/super-lotto-plus/",
+        "role": "backup",
+        "enabled": true
+      },
+      {
+        "name": "lottery_net",
+        "url": "https://www.lottery.net/california/superlotto-plus/numbers",
+        "role": "backup",
+        "enabled": true
+      },
+      {
+        "name": "lotterycorner",
+        "url": "https://www.lotterycorner.com/ca/superlotto-plus/",
+        "role": "backup",
+        "enabled": false
+      }
+    ],
+    "request_timeout_seconds": 20.0,
+    "retries": 3,
+    "backoff_seconds": 0.75,
+    "cache_ttl_seconds": 900,
+    "user_agent": "slp-production-audit/1.0 (+https://github.com/fabiansierra55-bit/Super)",
+    "minimum_agreeing_sources": 2
   },
   "training": {
     "windows": [60, 90, 120, 180, 240],
     "anchor_window": 240,
+    "anchor_min_relative_improvement": 0.01,
     "main_sigmas": [1.0, 1.125, 1.15, 1.3],
     "mega_sigmas": [0.9, 1.0, 1.15, 1.3],
     "half_lives_draws": [16, 20, 24, 28, 36, 45, 60],
+    "forward_folds": 12,
+    "forward_bundle_size": 30,
+    "likelihood_stability_margin": 1.5,
+    "reselection_interval_scored_draws": 10,
+    "drift_calibration_error_threshold": 0.12,
+    "drift_underperformance_draws": 5
+  },
+  "simulation": {
     "candidate_pool_size": 50000,
-    "simulation_draws": 100000
+    "optimization_draws": 4096,
+    "recenter_evaluation_draws": 10000,
+    "initial_draws": 50000,
+    "batch_draws": 25000,
+    "maximum_draws": 400000,
+    "confidence_level": 0.95,
+    "confidence_half_width_tolerance": 0.0025,
+    "stable_batches_required": 2
   },
   "bundle": {
     "size": 30,
+    "aggressive_count": 10,
+    "balanced_count": 10,
+    "conservative_count": 10,
     "max_main_overlap": 3,
     "min_hamming_distance": 2,
     "pair_repeat_cap": 2,
     "triple_repeat_cap": 1,
     "mega_soft_cap": 4,
     "mega_hard_cap": 5,
+    "aggressive_previous_draw_overlap_cap": 1,
     "adjacency_allowed": true,
     "parity_rule": false,
     "band_rule": false,
-    "positional_recentering": "mild"
+    "positional_recentering": "mild",
+    "recenter_strength": 0.15
   },
   "objective": {
     "mode": "grind",
     "p_ge_3_weight": 1.0,
-    "p_ge_4_weight": 0.0,
-    "three_plus_mega_weight": 0.0,
-    "anti_cannibalization_weight": 1.0
-  }
+    "p_ge_4_weight": 0.15,
+    "three_plus_mega_weight": 0.1,
+    "four_plus_weight": 0.1,
+    "anti_cannibalization_weight": 0.05,
+    "mega_repeat_penalty": 0.01,
+    "aggressive_secondary_multiplier": 1.25
+  },
+  "paths": {
+    "data_dir": "data",
+    "history_dir": "data/history",
+    "predictions_dir": "data/predictions",
+    "scoring_dir": "data/scoring",
+    "calibration_dir": "data/calibration",
+    "audit_dir": "data/audit",
+    "reports_dir": "reports",
+    "cache_dir": ".cache/slp"
+  },
+  "git": {
+    "artifact_branch_prefix": "automation/slp-cycle",
+    "protected_branch": "main",
+    "expected_repository": "fabiansierra55-bit/Super",
+    "auto_publish": false
+  },
+  "model_version": "slp-adaptive-bundle-v2"
 }
