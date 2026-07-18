@@ -41,6 +41,12 @@ slp cycle
 
 The command is safe to retry. A successful replay cannot create a duplicate score, history row, or next bundle. `--publish` is intended only on a non-`main` artifact branch; scheduled automation commits through a pull request.
 
+The validated default is a 60-line bundle with 20 Aggressive, 20 Balanced, and
+20 Conservative tickets. Candidate generation still uses at least 50,000
+unique tickets before global selection. The bundle size and all tier quotas are
+locked in metadata; scoring and reporting derive their denominators from that
+metadata rather than assuming 30 lines.
+
 ## Expected halts
 
 - `PrematureDrawError`: wait until the Pacific gate.
@@ -53,6 +59,20 @@ The command is safe to retry. A successful replay cannot create a duplicate scor
 ## Corrections
 
 Never modify a directory under `data/predictions/locked` or `data/scoring/locked`. A valid prediction correction must use a new `bundle_id`, increment `lock_version` by one, and name the current active bundle in `supersedes_bundle_id`. It must still be generated before the intended draw post time. Scoring artifacts are not reissued silently; conflicting evidence requires an explicit reviewed reconciliation design.
+
+On macOS, Finder may create a bounded `.DS_Store` sidecar in the `locked/`
+container or one of its date directories. Integrity discovery ignores that
+single platform filename only at those container levels. It remains forbidden
+inside every immutable bundle or scoring artifact, whose manifest file set and
+checksums must still match exactly; all other unexpected entries still halt the
+audit. `slp audit` reports the number of tolerated container sidecars so this
+exception is visible rather than silent.
+
+Changing from a 30-line regime to the 60-line default is a model/configuration
+change, not an in-place resize. It requires a full reselection and a separately
+optimized, separately certified correction. The prior 30-line bundle remains
+immutable and independently auditable; the new 60-line bundle is not required
+to contain it as a prefix.
 
 Use the explicit parent ID and a durable reason; rerunning the same command is
 idempotent. An exact replay resolves the existing direct child before model
@@ -82,6 +102,19 @@ useful but are labeled as non-production-equivalent. Selection evidence stores
 exact fair coverage separately from model-conditional estimates and exposes
 the tradeoff when the unvalidated-model robustness policy chooses the fair
 challenger. Production generation always enforces at least 50,000 candidates.
+A production-selection-path backtest must use the configured 60-line bundle
+size and 20/20/20 tier quotas. If it reduces optimizer or metric simulation
+counts for diagnostic runtime, its artifact and report must expose those counts
+and must not call the run fully production-scale.
+
+Fold identity uses `cutoff-draw-facts-v1`: only each pre-target draw's date,
+official draw ID, five mains, and Mega enter the training-prefix hash. Source
+response hashes, verification/fetch timestamps, and the full-history snapshot
+identity are excluded from deterministic seeds because an archive response
+fetched later can contain held-out results. The report retains the full snapshot
+hash only as lineage evidence and explicitly records that it was not a seed
+input.
+
 Reports are content-addressed and never overwrite a prior report.
 
 New candidate pools use `portable-fixed-point-splitmix64-v2`. Their digest is
@@ -98,7 +131,7 @@ making an invalid cross-environment replay assertion.
 The scheduled workflow uses a stable `automation/slp-cycle-YYYY-MM-DD` branch.
 Pacific-time triggers are configured for 8:30, 9:00, 9:30, and 10:00 p.m.
 GitHub concurrency permits one running and one pending cycle, so a newer trigger
-can replace an intermediate pending run when a prior cycle exceeds 30 minutes.
+can replace an intermediate pending run when a prior cycle exceeds 45 minutes.
 The immutable stores make every execution safe to retry. If the branch or PR
 already exists, reruns reuse it.
 

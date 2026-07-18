@@ -24,11 +24,107 @@ from .models import ExactUniformMetrics, Ticket
 
 MAIN_DRAW_OUTCOME_COUNT: Literal[1_533_939] = 1_533_939
 FULL_DRAW_OUTCOME_COUNT: Literal[41_416_353] = 41_416_353
+SINGLE_LINE_GE3_COUNT = 8_821
+SINGLE_LINE_GE4_COUNT = 211
+SINGLE_INTERSECTION_GE3_COLLISION_COUNT = 36
+MAX_LINEAR_PACKING_LINES = min(
+    math.comb(47, 2) // math.comb(5, 2),
+    47 * ((47 - 1) // (5 - 1)) // 5,
+)
 OPTIMAL_30_LINE_GE3_COUNT = 258_582
 OPTIMAL_30_LINE_GE4_COUNT = 6_330
 OPTIMAL_30_LINE_3_PLUS_MEGA_COUNT = 264_630
 assert math.comb(47, 5) == MAIN_DRAW_OUTCOME_COUNT
 assert MAIN_DRAW_OUTCOME_COUNT * 27 == FULL_DRAW_OUTCOME_COUNT
+assert (
+    sum(math.comb(5, matched) * math.comb(42, 5 - matched) for matched in range(3, 6))
+    == SINGLE_LINE_GE3_COUNT
+)
+assert (
+    sum(math.comb(5, matched) * math.comb(42, 5 - matched) for matched in range(4, 6))
+    == SINGLE_LINE_GE4_COUNT
+)
+
+
+@dataclass(frozen=True)
+class FairCoverageCertificate:
+    """Exact upper target for a balanced linear five-number packing.
+
+    A linear bundle uses every two-number pair at most once, so any two lines
+    intersect in at most one main.  Every intersecting line pair duplicates
+    exactly 36 of its ``3+ mains`` outcomes.  Convexity makes the balanced
+    47-number degree sequence the unique lower bound on those intersections.
+    Repeated Mega values can retain maximum joint coverage when their main
+    sets are disjoint.
+
+    The certificate is an exact target once a construction attains it.  The
+    pair-capacity guard prevents impossible requests, but not every theoretical
+    size is promised to have a construction in an arbitrary candidate pool.
+    """
+
+    bundle_size: int
+    main_degree_floor: int
+    main_degree_ceiling: int
+    high_degree_number_count: int
+    intersecting_line_pair_count: int
+    covered_ge_3_mains_count: int
+    covered_ge_4_mains_count: int
+    covered_3_plus_mega_count: int
+    covered_4_plus_mega_count: int
+    covered_jackpot_count: int
+
+
+def fair_coverage_certificate(bundle_size: int) -> FairCoverageCertificate:
+    """Return the size-aware exact target for a balanced linear bundle."""
+
+    if bundle_size <= 0:
+        raise ValueError("fair coverage certificate requires a positive bundle size")
+    if bundle_size > MAX_LINEAR_PACKING_LINES:
+        raise ValueError("bundle size exceeds the two-number-pair capacity of a linear packing")
+    degree_floor, high_degree_count = divmod(5 * bundle_size, 47)
+    degree_ceiling = degree_floor + bool(high_degree_count)
+    intersecting_pairs = (47 - high_degree_count) * math.comb(degree_floor, 2)
+    intersecting_pairs += high_degree_count * math.comb(degree_floor + 1, 2)
+    return FairCoverageCertificate(
+        bundle_size=bundle_size,
+        main_degree_floor=degree_floor,
+        main_degree_ceiling=degree_ceiling,
+        high_degree_number_count=high_degree_count,
+        intersecting_line_pair_count=intersecting_pairs,
+        covered_ge_3_mains_count=(
+            bundle_size * SINGLE_LINE_GE3_COUNT
+            - intersecting_pairs * SINGLE_INTERSECTION_GE3_COLLISION_COUNT
+        ),
+        covered_ge_4_mains_count=bundle_size * SINGLE_LINE_GE4_COUNT,
+        covered_3_plus_mega_count=bundle_size * SINGLE_LINE_GE3_COUNT,
+        covered_4_plus_mega_count=bundle_size * SINGLE_LINE_GE4_COUNT,
+        covered_jackpot_count=bundle_size,
+    )
+
+
+def matches_fair_coverage_certificate(
+    metrics: ExactUniformMetrics,
+    bundle_size: int,
+) -> bool:
+    """Return whether exact metrics attain every size-aware certificate count."""
+
+    certificate = fair_coverage_certificate(bundle_size)
+    return all(
+        actual == expected
+        for actual, expected in (
+            (metrics.covered_ge_3_mains_count, certificate.covered_ge_3_mains_count),
+            (metrics.covered_ge_4_mains_count, certificate.covered_ge_4_mains_count),
+            (metrics.covered_3_plus_mega_count, certificate.covered_3_plus_mega_count),
+            (metrics.covered_4_plus_mega_count, certificate.covered_4_plus_mega_count),
+            (metrics.covered_5_mains_count, certificate.bundle_size),
+            (metrics.covered_jackpot_count, certificate.covered_jackpot_count),
+        )
+    )
+
+
+assert fair_coverage_certificate(30).covered_ge_3_mains_count == OPTIMAL_30_LINE_GE3_COUNT
+assert fair_coverage_certificate(30).covered_ge_4_mains_count == OPTIMAL_30_LINE_GE4_COUNT
+assert fair_coverage_certificate(30).covered_3_plus_mega_count == OPTIMAL_30_LINE_3_PLUS_MEGA_COUNT
 
 
 @lru_cache(maxsize=1)
@@ -143,6 +239,7 @@ def fair_challenger_decision(
     *,
     minimum_relative_improvement: float,
     require_30_line_optimum: bool = False,
+    require_line_optimum: int | None = None,
     non_regression_references: Sequence[ExactUniformMetrics] = (),
 ) -> PromotionDecision:
     """Require model-reference improvement and no incumbent fair-odds regression."""
@@ -151,11 +248,12 @@ def fair_challenger_decision(
         raise ValueError("fair challenger promotion requires at least one reference")
     if minimum_relative_improvement < 0:
         raise ValueError("minimum relative improvement cannot be negative")
-    if require_30_line_optimum and (
-        challenger.covered_ge_3_mains_count != OPTIMAL_30_LINE_GE3_COUNT
-        or challenger.covered_ge_4_mains_count != OPTIMAL_30_LINE_GE4_COUNT
-        or challenger.covered_3_plus_mega_count != OPTIMAL_30_LINE_3_PLUS_MEGA_COUNT
-        or challenger.covered_jackpot_count != 30
+    if require_30_line_optimum:
+        if require_line_optimum not in (None, 30):
+            raise ValueError("conflicting fair-coverage certificate bundle sizes")
+        require_line_optimum = 30
+    if require_line_optimum is not None and not matches_fair_coverage_certificate(
+        challenger, require_line_optimum
     ):
         return PromotionDecision(False, "global fair-coverage certificate not met", 0.0)
     reference_primary = max(item.p_any_ge_3_mains for item in references)
@@ -178,8 +276,10 @@ def fair_challenger_decision(
 
 
 __all__ = [
+    "FairCoverageCertificate",
     "FULL_DRAW_OUTCOME_COUNT",
     "MAIN_DRAW_OUTCOME_COUNT",
+    "MAX_LINEAR_PACKING_LINES",
     "OPTIMAL_30_LINE_3_PLUS_MEGA_COUNT",
     "OPTIMAL_30_LINE_GE3_COUNT",
     "OPTIMAL_30_LINE_GE4_COUNT",
@@ -187,5 +287,7 @@ __all__ = [
     "exact_coverage_regressions",
     "exact_uniform_metrics",
     "fair_challenger_decision",
+    "fair_coverage_certificate",
     "fair_uniform_model",
+    "matches_fair_coverage_certificate",
 ]

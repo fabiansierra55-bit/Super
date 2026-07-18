@@ -714,6 +714,21 @@ def _event_payload(event: Mapping[str, Any], *, event_type: str) -> dict[str, An
     return cast(dict[str, Any], payload)
 
 
+_IGNORABLE_CONTAINER_METADATA = frozenset({".DS_Store"})
+_MAX_IGNORABLE_METADATA_BYTES = 1_048_576
+
+
+def _is_ignorable_container_metadata(path: Path) -> bool:
+    """Recognize bounded OS sidecars only outside immutable artifacts."""
+
+    return (
+        path.name in _IGNORABLE_CONTAINER_METADATA
+        and not path.is_symlink()
+        and path.is_file()
+        and path.stat().st_size <= _MAX_IGNORABLE_METADATA_BYTES
+    )
+
+
 def _physical_artifact_directories(locked_root: Path) -> set[Path]:
     """Return every two-level artifact directory without trusting its name."""
 
@@ -723,13 +738,31 @@ def _physical_artifact_directories(locked_root: Path) -> set[Path]:
         raise IntegrityError(f"locked artifact root is not a regular directory: {locked_root}")
     directories: set[Path] = set()
     for first_level in locked_root.iterdir():
+        if _is_ignorable_container_metadata(first_level):
+            continue
         if first_level.is_symlink() or not first_level.is_dir():
             raise IntegrityError(f"unexpected entry in locked artifact root: {first_level}")
         for artifact in first_level.iterdir():
+            if _is_ignorable_container_metadata(artifact):
+                continue
             if artifact.is_symlink() or not artifact.is_dir():
                 raise IntegrityError(f"unexpected entry in artifact date directory: {artifact}")
             directories.add(artifact)
     return directories
+
+
+def _container_metadata_count(locked_root: Path) -> int:
+    """Count the narrowly tolerated sidecars so integrity reports remain explicit."""
+
+    if not locked_root.exists() or not locked_root.is_dir():
+        return 0
+    count = 0
+    for first_level in locked_root.iterdir():
+        if _is_ignorable_container_metadata(first_level):
+            count += 1
+        elif first_level.is_dir() and not first_level.is_symlink():
+            count += sum(_is_ignorable_container_metadata(path) for path in first_level.iterdir())
+    return count
 
 
 def _attestation_for(
@@ -866,6 +899,42 @@ class BundleStore:
             ).encode("utf-8")
             if hashlib.sha256(raw_config).hexdigest() != metadata.configuration_sha256:
                 raise IntegrityError("locked configuration snapshot hash does not match")
+        if evidence is not None and evidence.evidence_version >= 4:
+            snapshot = metadata.configuration_snapshot
+            game = snapshot.get("game")
+            training = snapshot.get("training")
+            bundle_config = snapshot.get("bundle")
+            if not all(isinstance(item, dict) for item in (game, training, bundle_config)):
+                raise IntegrityError("version 4 configuration snapshot is incomplete")
+            assert isinstance(game, dict)
+            assert isinstance(training, dict)
+            assert isinstance(bundle_config, dict)
+            tier_counts = {
+                tier: sum(line.strategy == tier for line in bundle.lines)
+                for tier in ("aggressive", "balanced", "conservative")
+            }
+            recorded_claims = (
+                snapshot.get("model_version"),
+                game.get("rules_version"),
+                training.get("forward_bundle_size"),
+                bundle_config.get("size"),
+                bundle_config.get("aggressive_count"),
+                bundle_config.get("balanced_count"),
+                bundle_config.get("conservative_count"),
+            )
+            actual_claims = (
+                metadata.model_version,
+                metadata.game_rules_version,
+                metadata.bundle_size,
+                metadata.bundle_size,
+                tier_counts["aggressive"],
+                tier_counts["balanced"],
+                tier_counts["conservative"],
+            )
+            if recorded_claims != actual_claims:
+                raise IntegrityError(
+                    "version 4 configuration claims do not match locked bundle metadata"
+                )
 
     def _load_event(self, event: Mapping[str, Any]) -> tuple[LockedBundle, Path]:
         payload = _event_payload(event, event_type="prediction_bundle_locked")
@@ -1111,6 +1180,7 @@ class BundleStore:
                     "draw_id": metadata.draw_id or "",
                     "game_rules_version": metadata.game_rules_version,
                     "model_version": metadata.model_version,
+                    "bundle_size": metadata.bundle_size,
                     "configuration_sha256": metadata.configuration_sha256,
                     "random_seed": metadata.random_seed,
                     "source_verification_sha256": verification_sha256,
@@ -1473,6 +1543,8 @@ class ScoreStore:
                 {
                     "score_id": score.score_id,
                     "bundle_id": score.bundle_id,
+                    "bundle_size": score.bundle_size or len(score.lines),
+                    "model_version": score.model_version,
                     "draw_date": score.intended_draw_date.isoformat(),
                     "draw_id": score.draw.draw_id or "",
                     "strategy": line.strategy,
@@ -1667,7 +1739,9 @@ def audit_all_stores(
         "score_attestations": scores.attestations.verify(),
         "history_snapshots": history.audit_integrity(),
         "locked_bundles": bundles.audit_integrity(),
+        "prediction_container_metadata_sidecars": _container_metadata_count(bundles.locked_root),
         "scoring_artifacts": scores.audit_integrity(),
+        "scoring_container_metadata_sidecars": _container_metadata_count(scores.locked_root),
     }
     summary["mirrored_store_events"] = verify_audit_mirrors(
         audit_log,
@@ -1689,6 +1763,13 @@ def audit_all_stores(
             )
         if bundle.metadata.intended_draw_date != score.intended_draw_date:
             raise IntegrityError(f"score {score.score_id} has the wrong draw association")
+        if score.bundle_size is not None and score.bundle_size != bundle.metadata.bundle_size:
+            raise IntegrityError(f"score {score.score_id} has the wrong bundle-size provenance")
+        if (
+            score.model_version != "unknown"
+            and score.model_version != bundle.metadata.model_version
+        ):
+            raise IntegrityError(f"score {score.score_id} has the wrong model-version provenance")
         bundle_lines = {
             (line.strategy, line.line_id, line.mains, line.mega) for line in bundle.lines
         }

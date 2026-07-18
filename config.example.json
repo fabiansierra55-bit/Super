@@ -53,7 +53,7 @@
     "mega_sigmas": [0.9, 1.0, 1.15, 1.3],
     "half_lives_draws": [16, 20, 24, 28, 36, 45, 60],
     "forward_folds": 12,
-    "forward_bundle_size": 30,
+    "forward_bundle_size": 60,
     "likelihood_stability_margin": 1.5,
     "reselection_interval_scored_draws": 10,
     "drift_calibration_error_threshold": 0.12,
@@ -71,10 +71,10 @@
     "stable_batches_required": 2
   },
   "bundle": {
-    "size": 30,
-    "aggressive_count": 10,
-    "balanced_count": 10,
-    "conservative_count": 10,
+    "size": 60,
+    "aggressive_count": 20,
+    "balanced_count": 20,
+    "conservative_count": 20,
     "max_main_overlap": 3,
     "min_hamming_distance": 2,
     "pair_repeat_cap": 2,
@@ -106,8 +106,8 @@
     "minimum_relative_improvement": 0.001,
     "max_main_overlap": 1,
     "pair_repeat_cap": 1,
-    "mega_soft_cap": 1,
-    "mega_hard_cap": 2,
+    "mega_soft_cap": 2,
+    "mega_hard_cap": 3,
     "anti_cannibalization_weight": 0.15
   },
   "paths": {
@@ -126,5 +126,5 @@
     "expected_repository": "fabiansierra55-bit/Super",
     "auto_publish": false
   },
-  "model_version": "slp-robust-fair-coverage-v4"
+  "model_version": "slp-robust-fair-coverage-v5"
 }

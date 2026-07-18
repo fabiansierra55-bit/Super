@@ -10,7 +10,12 @@ import pytest
 
 from slp_model.application import Application
 from slp_model.constraints import validate_bundle
-from slp_model.fair_odds import exact_uniform_metrics, fair_uniform_model
+from slp_model.fair_odds import (
+    exact_uniform_metrics,
+    fair_coverage_certificate,
+    fair_uniform_model,
+    matches_fair_coverage_certificate,
+)
 from slp_model.modeling import ComponentParameters, ModelParameters, fit_model
 from slp_model.models import Draw, Ticket
 from slp_model.optimizer import (
@@ -178,6 +183,13 @@ def test_objective_weight_knobs_are_validated() -> None:
         ObjectiveWeights(aggressive_secondary_multiplier=0.99)
     with pytest.raises(ValueError, match="cannot be negative"):
         ObjectiveWeights(mega_repeat_penalty=-0.01)
+    with pytest.raises(ValueError, match="Mega hard cap"):
+        OptimizerConstraints(
+            bundle_size=60,
+            tickets_per_tier=20,
+            mega_soft_cap=2,
+            mega_hard_cap=2,
+        )
 
 
 def test_fair_optimizer_reaches_exact_coverage_certificate() -> None:
@@ -221,6 +233,126 @@ def test_fair_optimizer_reaches_exact_coverage_certificate() -> None:
     assert report.maximum_pairwise_overlap == 1
     assert report.maximum_pair_repetition == 1
     assert report.maximum_mega_repetition <= 2
+
+
+def test_fair_optimizer_deterministically_certifies_60_lines() -> None:
+    model = fair_uniform_model(_model())
+    seed = 13_628_164_553_973_667_705
+    previous = (1, 2, 3, 4, 5)
+    pool = generate_candidate_pool(model, size=50_000, seed=seed)
+    constraints = OptimizerConstraints(
+        bundle_size=60,
+        tickets_per_tier=20,
+        max_main_overlap=1,
+        pair_cap=1,
+        mega_soft_cap=2,
+        mega_hard_cap=3,
+    )
+
+    result = optimize_fair_coverage(
+        pool,
+        model,
+        seed=seed ^ 0xA5A5A5A55A5A5A5A,
+        previous_draw=previous,
+        constraints=constraints,
+        marginal_simulations=128,
+        restarts=4,
+    )
+    exact = exact_uniform_metrics(result.tickets)
+    certificate = fair_coverage_certificate(60)
+    report = validate_bundle(
+        result.tickets,
+        max_overlap=1,
+        pair_cap=1,
+        triple_cap=1,
+        mega_hard_cap=3,
+    )
+    main_degrees = Counter(number for ticket in result.tickets for number in ticket.mains)
+
+    assert matches_fair_coverage_certificate(exact, 60)
+    assert exact.covered_ge_3_mains_count == certificate.covered_ge_3_mains_count
+    assert result.tier_counts == {
+        "aggressive": 20,
+        "balanced": 20,
+        "conservative": 20,
+    }
+    assert Counter(main_degrees.values()) == {6: 29, 7: 18}
+    assert report.maximum_pairwise_overlap == 1
+    assert report.maximum_pair_repetition == 1
+    assert report.maximum_mega_repetition <= 3
+    assert all(
+        set(left.mains).isdisjoint(right.mains)
+        for index, left in enumerate(result.tickets)
+        for right in result.tickets[index + 1 :]
+        if left.mega == right.mega
+    )
+    assert all(
+        len(set(candidate.ticket.mains) & set(previous)) <= 1
+        for candidate in result.candidates
+        if candidate.tier == "aggressive"
+    )
+    assert tuple(candidate.generation_index for candidate in result.candidates) == (
+        3_700,
+        38_268,
+        28_773,
+        9_133,
+        30_565,
+        16_331,
+        19_442,
+        30_566,
+        46_574,
+        3_755,
+        41_969,
+        7_764,
+        49_335,
+        21_653,
+        46_599,
+        21_107,
+        38_271,
+        10_942,
+        23_290,
+        8_301,
+        45_246,
+        23_422,
+        10_599,
+        1_706,
+        11_519,
+        29_668,
+        36_487,
+        18_047,
+        31_529,
+        27_420,
+        38_447,
+        7_277,
+        15_582,
+        11_469,
+        36_922,
+        44_265,
+        2_108,
+        2_796,
+        286,
+        41_931,
+        20_510,
+        29_838,
+        26_841,
+        39_569,
+        42_265,
+        48_178,
+        43_138,
+        17_352,
+        24_954,
+        3_423,
+        36_084,
+        40_537,
+        21_261,
+        19_246,
+        26_890,
+        10_963,
+        4_492,
+        7_817,
+        34_182,
+        36_109,
+    )
 
 
 @pytest.mark.parametrize(

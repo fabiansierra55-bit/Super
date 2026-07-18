@@ -33,8 +33,44 @@ def _aggregate_lines(lines: Sequence[ScoredLine]) -> dict[str, Any]:
     }
 
 
+def _score_regime(score: BundleScore) -> tuple[int, str]:
+    """Return explicit, legacy-safe score provenance for report grouping."""
+
+    return (score.bundle_size or len(score.lines), score.model_version)
+
+
+def _regime_report(scores: Sequence[BundleScore]) -> dict[str, Any]:
+    ordered = sorted(scores, key=lambda score: score.intended_draw_date)
+    bundle_size, model_version = _score_regime(ordered[0])
+    all_lines = [line for score in ordered for line in score.lines]
+    return {
+        "regime_id": f"{bundle_size}-line::{model_version}",
+        "bundle_size": bundle_size,
+        "model_version": model_version,
+        "provenance_complete": model_version != "unknown"
+        and all(score.bundle_size is not None for score in ordered),
+        "score_count": len(ordered),
+        "score_ids": [score.score_id for score in ordered],
+        "draw_date_start": ordered[0].intended_draw_date.isoformat(),
+        "draw_date_end": ordered[-1].intended_draw_date.isoformat(),
+        "overall": _aggregate_lines(all_lines),
+        "tiers": {
+            tier: _aggregate_lines([line for line in all_lines if line.strategy == tier])
+            for tier in ("aggressive", "balanced", "conservative")
+        },
+        "latest_rolling_calibration": ordered[-1].calibration_error,
+    }
+
+
 def build_performance_report(scores: Sequence[BundleScore]) -> dict[str, Any]:
     ordered = sorted(scores, key=lambda score: score.intended_draw_date)
+    grouped_scores: dict[tuple[int, str], list[BundleScore]] = {}
+    for score in ordered:
+        grouped_scores.setdefault(_score_regime(score), []).append(score)
+    regimes = [
+        _regime_report(grouped_scores[key])
+        for key in sorted(grouped_scores, key=lambda item: (item[0], item[1]))
+    ]
     all_lines = [line for score in ordered for line in score.lines]
     tier_statistics = {
         tier: _aggregate_lines([line for line in all_lines if line.strategy == tier])
@@ -44,6 +80,9 @@ def build_performance_report(scores: Sequence[BundleScore]) -> dict[str, Any]:
         {
             "draw_date": score.intended_draw_date.isoformat(),
             "bundle_id": score.bundle_id,
+            "bundle_size": score.bundle_size or len(score.lines),
+            "model_version": score.model_version,
+            "regime_id": f"{score.bundle_size or len(score.lines)}-line::{score.model_version}",
             "strategy": line.strategy,
             "line_id": line.line_id,
             "mains": list(line.mains),
@@ -65,6 +104,9 @@ def build_performance_report(scores: Sequence[BundleScore]) -> dict[str, Any]:
         {
             "draw_date": score.intended_draw_date.isoformat(),
             "bundle_id": score.bundle_id,
+            "bundle_size": score.bundle_size or len(score.lines),
+            "model_version": score.model_version,
+            "regime_id": (f"{score.bundle_size or len(score.lines)}-line::{score.model_version}"),
             "predicted": {
                 "p_any_ge_3_mains": score.predicted_metrics.p_any_ge_3_mains,
                 "p_any_ge_4_mains": score.predicted_metrics.p_any_ge_4_mains,
@@ -83,17 +125,28 @@ def build_performance_report(scores: Sequence[BundleScore]) -> dict[str, Any]:
         for score in ordered
     ]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "report_type": "scored_bundle_performance",
         "score_count": len(ordered),
         "draw_date_start": ordered[0].intended_draw_date.isoformat() if ordered else None,
         "draw_date_end": ordered[-1].intended_draw_date.isoformat() if ordered else None,
         "score_ids": [score.score_id for score in ordered],
+        "regime_count": len(regimes),
+        "mixed_regimes": len(regimes) > 1,
+        "regimes": regimes,
+        "cross_regime_aggregation_scope": (
+            "descriptive line outcomes only; rolling calibration is regime-specific"
+        ),
         "overall": _aggregate_lines(all_lines),
         "tiers": tier_statistics,
         "best_performing_tickets": ranked[: min(10, len(ranked))],
         "predicted_vs_realized": comparisons,
         "latest_rolling_calibration": (ordered[-1].calibration_error if ordered else {}),
+        "latest_calibration_regime_id": (
+            f"{_score_regime(ordered[-1])[0]}-line::{_score_regime(ordered[-1])[1]}"
+            if ordered
+            else None
+        ),
         "disclaimer": (
             "Lottery outcomes are random; these statistics do not establish predictability."
         ),
@@ -112,26 +165,58 @@ def _markdown(report: dict[str, Any]) -> str:
             f"Draw range: {report['draw_date_start'] or 'n/a'} through "
             f"{report['draw_date_end'] or 'n/a'}"
         ),
+        f"Calibration regimes: {report['regime_count']}",
         "",
-        "## Overall line statistics",
+        "## Calibration regimes",
         "",
-        f"- Lines: {overall['line_count']}",
-        f"- Main-match histogram (0-5): {overall['histogram']}",
-        f"- Mega hits: {overall['mega_hit_count']} ({overall['mega_hit_rate']:.4f})",
-        f"- Mean main matches: {overall['mean_main_matches']:.4f}",
-        (
-            "- Population/sample standard deviation: "
-            f"{overall['population_stddev']:.4f} / {overall['sample_stddev']:.4f}"
-        ),
-        f"- Empirical P(>=2): {overall['empirical_p_ge_2']:.4f}",
-        f"- Empirical P(>=3): {overall['empirical_p_ge_3']:.4f}",
-        f"- Empirical P(>=4): {overall['empirical_p_ge_4']:.4f}",
-        "",
-        "## Tier summary",
-        "",
-        "| Tier | Lines | Mean mains | Mega rate | P(>=3) | Histogram |",
-        "|---|---:|---:|---:|---:|---|",
     ]
+    if not report["regimes"]:
+        lines.append("No scored calibration regimes exist yet.")
+    else:
+        lines.extend(
+            [
+                "| Regime | Draws | Range | Lines scored |",
+                "|---|---:|---|---:|",
+            ]
+        )
+        for regime in report["regimes"]:
+            lines.append(
+                f"| `{regime['regime_id']}` | {regime['score_count']} | "
+                f"{regime['draw_date_start']} through {regime['draw_date_end']} | "
+                f"{regime['overall']['line_count']} |"
+            )
+    lines.extend(
+        [
+            "",
+            (
+                "Overall statistics below pool line outcomes for descriptive reporting only; "
+                "rolling calibration is calculated within matching bundle-size/model regimes."
+            ),
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            "## Overall line statistics",
+            "",
+            f"- Lines: {overall['line_count']}",
+            f"- Main-match histogram (0-5): {overall['histogram']}",
+            f"- Mega hits: {overall['mega_hit_count']} ({overall['mega_hit_rate']:.4f})",
+            f"- Mean main matches: {overall['mean_main_matches']:.4f}",
+            (
+                "- Population/sample standard deviation: "
+                f"{overall['population_stddev']:.4f} / {overall['sample_stddev']:.4f}"
+            ),
+            f"- Empirical P(>=2): {overall['empirical_p_ge_2']:.4f}",
+            f"- Empirical P(>=3): {overall['empirical_p_ge_3']:.4f}",
+            f"- Empirical P(>=4): {overall['empirical_p_ge_4']:.4f}",
+            "",
+            "## Tier summary",
+            "",
+            "| Tier | Lines | Mean mains | Mega rate | P(>=3) | Histogram |",
+            "|---|---:|---:|---:|---:|---|",
+        ]
+    )
     for tier, statistics in report["tiers"].items():
         lines.append(
             f"| {tier} | {statistics['line_count']} | "
@@ -158,7 +243,8 @@ def _markdown(report: dict[str, Any]) -> str:
     lines.extend(["", "## Predicted versus realized", ""])
     for comparison in report["predicted_vs_realized"]:
         lines.append(
-            f"- {comparison['draw_date']} `{comparison['bundle_id']}`: "
+            f"- {comparison['draw_date']} `{comparison['bundle_id']}` "
+            f"(`{comparison['regime_id']}`): "
             f"predicted P(>=3)={comparison['predicted']['p_any_ge_3_mains']:.4f}; "
             f"realized={comparison['realized']['any_ge_3_mains']}"
         )

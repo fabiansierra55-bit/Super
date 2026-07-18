@@ -22,7 +22,7 @@ concurrency:
 jobs:
   verify-score-generate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 70
+    timeout-minutes: 90
     permissions:
       actions: write
       contents: write
@@ -114,7 +114,10 @@ jobs:
       - name: Run fail-closed production cycle and report
         id: production
         continue-on-error: true
-        timeout-minutes: 30
+        # A certified 60-line generation performs twice as many constrained
+        # selections as the historical 30-line regime. Keep a bounded margin
+        # for adaptive simulation while preserving fail-closed cancellation.
+        timeout-minutes: 45
         shell: bash
         run: |
           set +e
