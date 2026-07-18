@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from datetime import UTC, date, datetime, time
 from typing import Any, Literal
@@ -152,6 +153,76 @@ class SelectedHyperparameters(FrozenModel):
     _normalize_selected = field_validator("selection_timestamp_utc")(_aware_utc)
 
 
+class ExactUniformMetrics(FrozenModel):
+    """Exact coverage when all valid main/Mega outcomes are equiprobable."""
+
+    method: Literal["exact-uniform-enumeration-v1"] = "exact-uniform-enumeration-v1"
+    main_draw_outcome_count: Literal[1_533_939]
+    full_draw_outcome_count: Literal[41_416_353]
+    covered_ge_3_mains_count: int = Field(ge=0)
+    covered_ge_4_mains_count: int = Field(ge=0)
+    covered_3_plus_mega_count: int = Field(ge=0)
+    covered_4_plus_mega_count: int = Field(ge=0)
+    covered_5_mains_count: int = Field(ge=0)
+    covered_jackpot_count: int = Field(ge=0)
+    p_any_ge_3_mains: float = Field(ge=0, le=1)
+    p_any_ge_4_mains: float = Field(ge=0, le=1)
+    p_any_3_plus_mega: float = Field(ge=0, le=1)
+    p_any_4_plus_mega: float = Field(ge=0, le=1)
+    p_any_5_mains: float = Field(ge=0, le=1)
+    p_jackpot: float = Field(ge=0, le=1)
+    mean_best_main_matches: float = Field(ge=0, le=5)
+    best_match_histogram: tuple[int, int, int, int, int, int]
+
+    @model_validator(mode="after")
+    def validate_exact_arithmetic(self) -> ExactUniformMetrics:
+        if self.full_draw_outcome_count != self.main_draw_outcome_count * 27:
+            raise ValueError("full fair-outcome denominator must equal mains times 27")
+        if sum(self.best_match_histogram) != self.main_draw_outcome_count:
+            raise ValueError("fair best-match histogram does not cover the main outcome space")
+        if any(count < 0 for count in self.best_match_histogram):
+            raise ValueError("fair best-match histogram cannot contain negative counts")
+        if (
+            sum(self.best_match_histogram[3:]) != self.covered_ge_3_mains_count
+            or sum(self.best_match_histogram[4:]) != self.covered_ge_4_mains_count
+            or self.best_match_histogram[5] != self.covered_5_mains_count
+        ):
+            raise ValueError("fair event numerators do not match the best-match histogram")
+        if not (
+            self.covered_5_mains_count
+            <= self.covered_ge_4_mains_count
+            <= self.covered_ge_3_mains_count
+            <= self.main_draw_outcome_count
+        ):
+            raise ValueError("fair main-event numerators are not properly nested")
+        if not (
+            self.covered_jackpot_count
+            <= self.covered_4_plus_mega_count
+            <= self.covered_3_plus_mega_count
+            <= self.full_draw_outcome_count
+        ):
+            raise ValueError("fair Mega-event numerators are not properly nested")
+        expected = (
+            (self.p_any_ge_3_mains, self.covered_ge_3_mains_count / self.main_draw_outcome_count),
+            (self.p_any_ge_4_mains, self.covered_ge_4_mains_count / self.main_draw_outcome_count),
+            (self.p_any_3_plus_mega, self.covered_3_plus_mega_count / self.full_draw_outcome_count),
+            (self.p_any_4_plus_mega, self.covered_4_plus_mega_count / self.full_draw_outcome_count),
+            (self.p_any_5_mains, self.covered_5_mains_count / self.main_draw_outcome_count),
+            (self.p_jackpot, self.covered_jackpot_count / self.full_draw_outcome_count),
+        )
+        if any(
+            not math.isclose(value, calculated, abs_tol=1e-15) for value, calculated in expected
+        ):
+            raise ValueError("fair probability does not match its exact numerator")
+        histogram_mean = (
+            sum(matches * count for matches, count in enumerate(self.best_match_histogram))
+            / self.main_draw_outcome_count
+        )
+        if not math.isclose(self.mean_best_main_matches, histogram_mean, abs_tol=1e-15):
+            raise ValueError("fair mean does not match its best-match histogram")
+        return self
+
+
 class SimulationSummary(FrozenModel):
     simulation_count: int = Field(ge=1_000)
     candidate_pool_size: int = Field(ge=50_000)
@@ -167,10 +238,125 @@ class SimulationSummary(FrozenModel):
     p_any_4_plus: float = Field(ge=0, le=1)
     p_any_4_plus_mega: float = Field(default=0.0, ge=0, le=1)
     mean_best_main_matches: float = Field(ge=0, le=5)
+    fair_uniform_exact: ExactUniformMetrics | None = None
+
+
+class FairCoverageChallengerEvidence(FrozenModel):
+    evidence_version: Literal[1, 2, 3] = 1
+    selection_policy: Literal[
+        "legacy_exact_fair_gate",
+        "fair_null_robustness_over_unvalidated_model_v1",
+    ] = "legacy_exact_fair_gate"
+    model_skill_status: Literal["unvalidated", "validated"] = "unvalidated"
+    selected: bool
+    global_optimum_certified: bool = False
+    selection_reason: str = Field(min_length=1)
+    minimum_relative_improvement: float = Field(ge=0)
+    relative_primary_improvement: float
+    model_optimized_candidate: ExactUniformMetrics
+    challenger: ExactUniformMetrics
+    incumbent: ExactUniformMetrics | None = None
+    model_optimized_simulation: SimulationSummary | None = None
+    challenger_model_simulation: SimulationSummary | None = None
+    incumbent_model_simulation: SimulationSummary | None = None
+    relative_challenger_model_p_ge_3_change: float | None = None
+    relative_primary_change_vs_incumbent: float | None = None
+
+    @model_validator(mode="after")
+    def validate_promotion_evidence(self) -> FairCoverageChallengerEvidence:
+        certificate = (
+            self.challenger.covered_ge_3_mains_count == 258_582
+            and self.challenger.covered_ge_4_mains_count == 6_330
+            and self.challenger.covered_3_plus_mega_count == 264_630
+            and self.challenger.covered_jackpot_count == 30
+        )
+        if self.global_optimum_certified != certificate:
+            raise ValueError("fair global-certificate flag does not match exact metrics")
+        guarded_references = [self.model_optimized_candidate]
+        if self.incumbent is not None:
+            guarded_references.append(self.incumbent)
+        reference_primary = (
+            self.model_optimized_candidate.p_any_ge_3_mains
+            if self.evidence_version >= 3
+            else max(item.p_any_ge_3_mains for item in guarded_references)
+        )
+        expected_relative = self.challenger.p_any_ge_3_mains / reference_primary - 1.0
+        if not math.isclose(self.relative_primary_improvement, expected_relative, abs_tol=1e-15):
+            raise ValueError("fair primary-improvement claim does not match its references")
+        if self.selected:
+            if self.challenger.p_any_ge_3_mains + 1e-15 < reference_primary * (
+                1.0 + self.minimum_relative_improvement
+            ):
+                raise ValueError("selected fair challenger misses its primary threshold")
+            if (
+                self.incumbent is not None
+                and self.challenger.p_any_ge_3_mains + 1e-15 < self.incumbent.p_any_ge_3_mains
+            ):
+                raise ValueError("selected fair challenger regresses incumbent 3+ coverage")
+            if self.challenger.p_any_ge_4_mains + 1e-15 < max(
+                item.p_any_ge_4_mains for item in guarded_references
+            ):
+                raise ValueError("selected fair challenger regresses exact 4+ coverage")
+            if self.challenger.p_jackpot + 1e-15 < max(
+                item.p_jackpot for item in guarded_references
+            ):
+                raise ValueError("selected fair challenger regresses jackpot coverage")
+        if self.evidence_version >= 3 and self.incumbent is not None:
+            expected_incumbent_change = (
+                self.challenger.p_any_ge_3_mains / self.incumbent.p_any_ge_3_mains - 1.0
+            )
+            if self.relative_primary_change_vs_incumbent is None or not math.isclose(
+                self.relative_primary_change_vs_incumbent,
+                expected_incumbent_change,
+                abs_tol=1e-15,
+            ):
+                raise ValueError("incumbent fair-coverage comparison is inconsistent")
+        if self.evidence_version == 1:
+            return self
+        if self.selection_policy != "fair_null_robustness_over_unvalidated_model_v1":
+            raise ValueError("versioned challenger evidence requires the robustness policy")
+        if self.model_skill_status != "unvalidated":
+            raise ValueError("the fair-null robustness policy requires unvalidated model skill")
+        if self.model_optimized_simulation is None or self.challenger_model_simulation is None:
+            raise ValueError("versioned challenger evidence requires model estimates")
+        if (
+            not self.model_optimized_simulation.stable
+            or not self.challenger_model_simulation.stable
+        ):
+            raise ValueError("challenger comparison simulations must be stable")
+        if self.incumbent is not None and self.incumbent_model_simulation is None:
+            raise ValueError("versioned correction evidence requires incumbent model estimates")
+        model_primary = self.model_optimized_simulation.p_any_ge_3_mains
+        if model_primary <= 0:
+            raise ValueError("model candidate requires positive model-conditional P(>=3)")
+        expected_model_change = (
+            self.challenger_model_simulation.p_any_ge_3_mains / model_primary - 1.0
+        )
+        if self.relative_challenger_model_p_ge_3_change is None or not math.isclose(
+            self.relative_challenger_model_p_ge_3_change,
+            expected_model_change,
+            abs_tol=1e-15,
+        ):
+            raise ValueError("model-conditional tradeoff does not match stored simulations")
+        if (
+            self.model_optimized_simulation.fair_uniform_exact != self.model_optimized_candidate
+            or self.challenger_model_simulation.fair_uniform_exact != self.challenger
+        ):
+            raise ValueError("model simulations are not bound to their exact fair candidates")
+        if (
+            self.incumbent is not None
+            and self.incumbent_model_simulation is not None
+            and self.incumbent_model_simulation.fair_uniform_exact != self.incumbent
+        ):
+            raise ValueError("incumbent simulation is not bound to its exact fair metrics")
+        return self
 
 
 class OptimizerSettings(FrozenModel):
     algorithm: str = Field(min_length=1)
+    optimization_basis: Literal["adaptive_model_simulation", "exact_fair_uniform_coverage"] = (
+        "adaptive_model_simulation"
+    )
     objective_mode: Literal["grind", "spike"] = "grind"
     objective_weights: dict[str, float]
     constraints: dict[str, int | float | bool | str]
@@ -187,6 +373,17 @@ class OptimizerSettings(FrozenModel):
         "optimizer_selected_candidates"
     )
     marginal_contributions: tuple[dict[str, float | int | str], ...] = ()
+    fair_coverage_challenger: FairCoverageChallengerEvidence | None = None
+
+    @model_validator(mode="after")
+    def exact_basis_requires_certified_evidence(self) -> OptimizerSettings:
+        if self.optimization_basis == "exact_fair_uniform_coverage" and (
+            self.fair_coverage_challenger is None
+            or not self.fair_coverage_challenger.selected
+            or not self.fair_coverage_challenger.global_optimum_certified
+        ):
+            raise ValueError("exact fair optimization requires selected certified evidence")
+        return self
 
 
 class BundleMetadata(FrozenModel):
@@ -200,6 +397,8 @@ class BundleMetadata(FrozenModel):
     configuration_snapshot: dict[str, Any]
     configuration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     random_seed: int = Field(ge=0)
+    candidate_pool_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    candidate_pool_algorithm_version: str | None = Field(default=None, min_length=1)
     source_verification_metadata: VerificationMetadata
     history_cutoff_date: date
     history_snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -238,6 +437,26 @@ class BundleMetadata(FrozenModel):
                 raise ValueError("an initial bundle cannot claim correction metadata")
         elif self.supersedes_bundle_id is None or self.correction_reason is None:
             raise ValueError("a corrected bundle requires a parent ID and correction reason")
+        evidence = self.optimizer.fair_coverage_challenger
+        if (
+            self.lock_version > 1
+            and evidence is not None
+            and evidence.evidence_version >= 2
+            and (evidence.incumbent is None or evidence.incumbent_model_simulation is None)
+        ):
+            raise ValueError("versioned correction evidence must bind its incumbent bundle")
+        if self.optimizer.optimization_basis == "exact_fair_uniform_coverage":
+            if (
+                self.candidate_pool_sha256 is None
+                or self.simulation.fair_uniform_exact is None
+                or evidence is None
+                or self.simulation.fair_uniform_exact != evidence.challenger
+            ):
+                raise ValueError("exact fair bundle lacks bound pool, metrics, or evidence")
+            if evidence.evidence_version >= 2 and self.candidate_pool_algorithm_version is None:
+                raise ValueError(
+                    "versioned fair evidence requires a candidate-pool algorithm version"
+                )
         return self
 
 

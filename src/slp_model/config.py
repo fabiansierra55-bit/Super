@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .exceptions import ConfigurationError
 
 GAME_RULES_VERSION = "slp-5of47-mega-1of27-v1"
-MODEL_VERSION = "slp-adaptive-bundle-v2"
+MODEL_VERSION = "slp-robust-fair-coverage-v4"
 
 
 class FrozenModel(BaseModel):
@@ -182,6 +182,21 @@ class ObjectiveConfig(FrozenModel):
         return self
 
 
+class FairCoverageConfig(FrozenModel):
+    enabled: bool = True
+    selection_policy: Literal["fair_null_robustness_over_unvalidated_model_v1"] = (
+        "fair_null_robustness_over_unvalidated_model_v1"
+    )
+    model_skill_status: Literal["unvalidated"] = "unvalidated"
+    require_global_optimum: Literal[True] = True
+    minimum_relative_improvement: float = Field(default=0.001, ge=0, le=0.25)
+    max_main_overlap: Literal[1] = 1
+    pair_repeat_cap: Literal[1] = 1
+    mega_soft_cap: Literal[1] = 1
+    mega_hard_cap: Literal[2] = 2
+    anti_cannibalization_weight: float = Field(default=0.15, ge=0)
+
+
 class PathsConfig(FrozenModel):
     data_dir: Path = Path("data")
     history_dir: Path = Path("data/history")
@@ -207,6 +222,7 @@ class AppConfig(FrozenModel):
     simulation: SimulationConfig = SimulationConfig()
     bundle: BundleConfig = BundleConfig()
     objective: ObjectiveConfig = ObjectiveConfig()
+    fair_coverage: FairCoverageConfig = FairCoverageConfig()
     paths: PathsConfig = PathsConfig()
     git: GitConfig = GitConfig()
     model_version: str = MODEL_VERSION

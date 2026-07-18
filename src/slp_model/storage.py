@@ -818,7 +818,54 @@ class BundleStore:
             raw = json.loads(payload)
         except json.JSONDecodeError as exc:
             raise IntegrityError(f"invalid locked bundle JSON: {directory}") from exc
-        return LockedBundle.model_validate(raw["bundle"])
+        bundle = LockedBundle.model_validate(raw["bundle"])
+        self._validate_semantic_claims(bundle)
+        return bundle
+
+    @staticmethod
+    def _validate_semantic_claims(bundle: LockedBundle) -> None:
+        """Recompute claims that hashes and schema validation cannot establish."""
+
+        metadata = bundle.metadata
+        constraints = metadata.optimizer.constraints
+        try:
+            validate_bundle(
+                bundle.lines,
+                max_overlap=int(constraints["max_main_overlap"]),
+                min_hamming=int(constraints["min_hamming_distance"]),
+                pair_cap=int(constraints["pair_repeat_cap"]),
+                triple_cap=int(constraints["triple_repeat_cap"]),
+                mega_hard_cap=int(constraints["mega_hard_cap"]),
+                expected_size=metadata.bundle_size,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise IntegrityError("locked bundle violates its recorded constraints") from exc
+        stored = metadata.simulation.fair_uniform_exact
+        if stored is not None:
+            from .fair_odds import exact_uniform_metrics
+
+            calculated = exact_uniform_metrics(bundle.lines)
+            if calculated != stored:
+                raise IntegrityError("locked fair-coverage metrics do not match bundle lines")
+        evidence = metadata.optimizer.fair_coverage_challenger
+        if (
+            metadata.lock_version > 1
+            and evidence is not None
+            and evidence.evidence_version >= 2
+            and (evidence.incumbent is None or evidence.incumbent_model_simulation is None)
+        ):
+            raise IntegrityError("versioned correction evidence omits its incumbent binding")
+        if evidence is not None and evidence.selected and stored != evidence.challenger:
+            raise IntegrityError("selected challenger evidence does not match locked bundle lines")
+        if evidence is not None and evidence.evidence_version >= 2:
+            raw_config = json.dumps(
+                metadata.configuration_snapshot,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+            if hashlib.sha256(raw_config).hexdigest() != metadata.configuration_sha256:
+                raise IntegrityError("locked configuration snapshot hash does not match")
 
     def _load_event(self, event: Mapping[str, Any]) -> tuple[LockedBundle, Path]:
         payload = _event_payload(event, event_type="prediction_bundle_locked")
@@ -874,6 +921,32 @@ class BundleStore:
             bundle_ids.add(bundle_id)
             paths.add(path)
             entries.append((event, bundle, path))
+        by_id = {bundle.metadata.bundle_id: bundle for _, bundle, _ in entries}
+        for _, bundle, _ in entries:
+            evidence = bundle.metadata.optimizer.fair_coverage_challenger
+            parent_id = bundle.metadata.supersedes_bundle_id
+            if evidence is None or parent_id is None:
+                continue
+            if evidence.evidence_version >= 2 and (
+                evidence.incumbent is None or evidence.incumbent_model_simulation is None
+            ):
+                raise IntegrityError("versioned correction evidence omits its incumbent")
+            if evidence.incumbent is None:
+                continue
+            parent = by_id.get(parent_id)
+            if parent is None:
+                raise IntegrityError("challenger evidence references a missing incumbent bundle")
+            from .fair_odds import exact_uniform_metrics
+
+            if exact_uniform_metrics(parent.lines) != evidence.incumbent:
+                raise IntegrityError("challenger incumbent metrics do not match its parent bundle")
+            if (
+                evidence.incumbent_model_simulation is not None
+                and evidence.incumbent_model_simulation != parent.metadata.simulation
+            ):
+                raise IntegrityError(
+                    "challenger incumbent simulation does not match its parent bundle"
+                )
         return entries
 
     def list_for_draw(self, draw_date: date) -> list[LockedBundle]:
@@ -883,6 +956,20 @@ class BundleStore:
             for _, bundle, _ in self._indexed_entries()
             if bundle.metadata.intended_draw_date == draw_date
         ]
+
+    def list_bundles(self) -> list[LockedBundle]:
+        """Return every immutable version in canonical draw/version order."""
+
+        self.audit_integrity()
+        bundles = [bundle for _, bundle, _ in self._indexed_entries()]
+        return sorted(
+            bundles,
+            key=lambda bundle: (
+                bundle.metadata.intended_draw_date,
+                bundle.metadata.lock_version,
+                bundle.metadata.bundle_id,
+            ),
+        )
 
     def active_for_draw(self, draw_date: date) -> LockedBundle:
         bundles = self.list_for_draw(draw_date)
@@ -925,6 +1012,7 @@ class BundleStore:
         official_post_time_pacific: time = time(20, 0),
     ) -> Path:
         metadata = bundle.metadata
+        self._validate_semantic_claims(bundle)
         validate_bundle(
             bundle.lines,
             max_overlap=max_overlap,
@@ -1035,7 +1123,36 @@ class BundleStore:
                     "main_half_life_draws": selected.main_half_life_draws,
                     "mega_half_life_draws": selected.mega_half_life_draws,
                     "candidate_pool_size": metadata.simulation.candidate_pool_size,
+                    "candidate_pool_sha256": metadata.candidate_pool_sha256 or "",
+                    "candidate_pool_algorithm_version": (
+                        metadata.candidate_pool_algorithm_version or ""
+                    ),
                     "simulation_count": metadata.simulation.simulation_count,
+                    "fair_challenger_selected": (
+                        metadata.optimizer.fair_coverage_challenger.selected
+                        if metadata.optimizer.fair_coverage_challenger is not None
+                        else ""
+                    ),
+                    "fair_exact_p_any_ge_3_mains": (
+                        metadata.simulation.fair_uniform_exact.p_any_ge_3_mains
+                        if metadata.simulation.fair_uniform_exact is not None
+                        else ""
+                    ),
+                    "fair_exact_p_any_ge_4_mains": (
+                        metadata.simulation.fair_uniform_exact.p_any_ge_4_mains
+                        if metadata.simulation.fair_uniform_exact is not None
+                        else ""
+                    ),
+                    "fair_exact_p_any_3_plus_mega": (
+                        metadata.simulation.fair_uniform_exact.p_any_3_plus_mega
+                        if metadata.simulation.fair_uniform_exact is not None
+                        else ""
+                    ),
+                    "fair_exact_p_jackpot": (
+                        metadata.simulation.fair_uniform_exact.p_jackpot
+                        if metadata.simulation.fair_uniform_exact is not None
+                        else ""
+                    ),
                     "optimizer": optimizer_json,
                     "strategy": line.strategy,
                     "line_id": line.line_id,

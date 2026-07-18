@@ -14,6 +14,7 @@ from .calibration import CalibrationStore, calibrate
 from .config import AppConfig, resolve_path
 from .dates import next_draw_date
 from .exceptions import CyclePreconditionError, IntegrityError
+from .fair_odds import exact_uniform_metrics
 from .generation import build_locked_bundle, deterministic_seed
 from .models import BundleScore, LockedBundle, VerifiedDraw
 from .reporting import write_performance_report
@@ -169,6 +170,81 @@ class Application:
             "disclaimer": "Lottery outcomes are random; modeled bundles are not guarantees.",
         }
 
+    def resolve_bundle(self, bundle_id: str | None = None) -> LockedBundle:
+        if bundle_id is not None:
+            return self.bundle_store.find(bundle_id)
+        bundles = self.bundle_store.list_bundles()
+        if not bundles:
+            raise CyclePreconditionError("no locked prediction bundle exists")
+        latest_date = max(bundle.metadata.intended_draw_date for bundle in bundles)
+        return self.bundle_store.active_for_draw(latest_date)
+
+    def bundle_view(self, bundle_id: str | None = None) -> dict[str, Any]:
+        bundle = self.resolve_bundle(bundle_id)
+        return {
+            "bundle_id": bundle.metadata.bundle_id,
+            "intended_draw_date": bundle.metadata.intended_draw_date.isoformat(),
+            "model_version": bundle.metadata.model_version,
+            "lock_version": bundle.metadata.lock_version,
+            "lines": [line.model_dump(mode="json") for line in bundle.lines],
+        }
+
+    def bundle_odds(self, bundle_id: str | None = None) -> dict[str, Any]:
+        bundle = self.resolve_bundle(bundle_id)
+        exact = exact_uniform_metrics(bundle.lines)
+        evidence = bundle.metadata.optimizer.fair_coverage_challenger
+        return {
+            "bundle_id": bundle.metadata.bundle_id,
+            "intended_draw_date": bundle.metadata.intended_draw_date.isoformat(),
+            "fair_uniform_exact": exact.model_dump(mode="json"),
+            "model_conditional_simulation": bundle.metadata.simulation.model_dump(
+                mode="json", exclude={"fair_uniform_exact"}
+            ),
+            "selection_evidence": (
+                {
+                    "evidence_version": evidence.evidence_version,
+                    "selection_policy": evidence.selection_policy,
+                    "model_skill_status": evidence.model_skill_status,
+                    "selected": evidence.selected,
+                    "selection_reason": evidence.selection_reason,
+                    "global_optimum_certified": evidence.global_optimum_certified,
+                    "recorded_gate_relative_primary_improvement": (
+                        evidence.relative_primary_improvement
+                    ),
+                    "relative_exact_p_ge_3_improvement_over_model_candidate": (
+                        evidence.challenger.p_any_ge_3_mains
+                        / evidence.model_optimized_candidate.p_any_ge_3_mains
+                        - 1.0
+                    ),
+                    "relative_exact_p_ge_3_change_vs_incumbent": (
+                        evidence.challenger.p_any_ge_3_mains / evidence.incumbent.p_any_ge_3_mains
+                        - 1.0
+                        if evidence.incumbent is not None
+                        else None
+                    ),
+                    "relative_model_conditional_p_ge_3_change": (
+                        evidence.relative_challenger_model_p_ge_3_change
+                    ),
+                    "model_candidate_p_ge_3": (
+                        evidence.model_optimized_simulation.p_any_ge_3_mains
+                        if evidence.model_optimized_simulation is not None
+                        else None
+                    ),
+                    "challenger_model_p_ge_3": (
+                        evidence.challenger_model_simulation.p_any_ge_3_mains
+                        if evidence.challenger_model_simulation is not None
+                        else None
+                    ),
+                }
+                if evidence is not None
+                else None
+            ),
+            "interpretation": (
+                "Fair-uniform values are exact combinatorial coverage. Model-conditional "
+                "values assume the fitted historical distribution and are not objective odds."
+            ),
+        }
+
     def verify_latest(self, *, as_of_utc: datetime | None = None) -> VerifiedDraw:
         return self.sources.verify_latest(as_of_utc=as_of_utc)
 
@@ -247,6 +323,7 @@ class Application:
         existing = self.bundle_store.list_for_draw(target)
         lock_version = 1
         normalized_reason: str | None = None
+        incumbent_bundle: LockedBundle | None = None
         if existing:
             if supersede_bundle_id is None:
                 return self.bundle_store.active_for_draw(target), True
@@ -270,6 +347,7 @@ class Application:
                     )
                 return child, True
             active = self.bundle_store.active_for_draw(target)
+            incumbent_bundle = active
             if active.metadata.bundle_id != supersede_bundle_id:
                 raise CyclePreconditionError("correction parent must be the current active bundle")
             if self.score_store.for_bundle(active.metadata.bundle_id) is not None:
@@ -306,15 +384,16 @@ class Application:
             lock_version=lock_version,
             supersedes_bundle_id=supersede_bundle_id,
             correction_reason=normalized_reason,
+            incumbent_bundle=incumbent_bundle,
         )
         self.bundle_store.lock(
             bundle,
             previous_draw_mains=draws[-1].mains,
-            max_overlap=self.config.bundle.max_main_overlap,
+            max_overlap=int(bundle.metadata.optimizer.constraints["max_main_overlap"]),
             min_hamming=self.config.bundle.min_hamming_distance,
-            pair_cap=self.config.bundle.pair_repeat_cap,
+            pair_cap=int(bundle.metadata.optimizer.constraints["pair_repeat_cap"]),
             triple_cap=self.config.bundle.triple_repeat_cap,
-            mega_hard_cap=self.config.bundle.mega_hard_cap,
+            mega_hard_cap=int(bundle.metadata.optimizer.constraints["mega_hard_cap"]),
             aggressive_previous_overlap_cap=(
                 self.config.bundle.aggressive_previous_draw_overlap_cap
             ),
@@ -461,7 +540,7 @@ class Application:
         self,
         *,
         evaluations: int = 3,
-        diagnostic_candidate_pool_size: int = 6_000,
+        diagnostic_candidate_pool_size: int = 50_000,
     ) -> tuple[Path, Path]:
         current = self.history_store.load_latest()
         if current is None:

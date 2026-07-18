@@ -98,6 +98,18 @@
     "mega_repeat_penalty": 0.01,
     "aggressive_secondary_multiplier": 1.25
   },
+  "fair_coverage": {
+    "enabled": true,
+    "selection_policy": "fair_null_robustness_over_unvalidated_model_v1",
+    "model_skill_status": "unvalidated",
+    "require_global_optimum": true,
+    "minimum_relative_improvement": 0.001,
+    "max_main_overlap": 1,
+    "pair_repeat_cap": 1,
+    "mega_soft_cap": 1,
+    "mega_hard_cap": 2,
+    "anti_cannibalization_weight": 0.15
+  },
   "paths": {
     "data_dir": "data",
     "history_dir": "data/history",
@@ -114,5 +126,5 @@
     "expected_repository": "fabiansierra55-bit/Super",
     "auto_publish": false
   },
-  "model_version": "slp-adaptive-bundle-v2"
+  "model_version": "slp-robust-fair-coverage-v4"
 }

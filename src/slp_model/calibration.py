@@ -11,7 +11,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .config import AppConfig
-from .exceptions import IntegrityError
+from .exceptions import CalibrationError, IntegrityError
 from .modeling import (
     AdaptiveSelection,
     ComponentParameters,
@@ -188,11 +188,38 @@ class CalibrationStore:
             raise IntegrityError(f"calibration artifact failed checksum: {path}")
         return CalibrationArtifact.model_validate(raw["calibration"])
 
+    @staticmethod
+    def _same_reproducible_fit(
+        existing: CalibrationArtifact, proposed: CalibrationArtifact
+    ) -> bool:
+        """Ignore lifecycle-only fields when a deterministic fit identity is replayed."""
+
+        lifecycle = {
+            "created_timestamp_utc",
+            "hyperparameter_selection_timestamp_utc",
+            "reasons",
+            "parent_calibration_id",
+        }
+        return existing.model_dump(exclude=lifecycle) == proposed.model_dump(exclude=lifecycle)
+
     def latest(self) -> CalibrationArtifact | None:
         events = self.index.read()
         if not events:
             return None
         return self._load_event(events[-1])[0]
+
+    def find(self, calibration_id: str) -> CalibrationArtifact:
+        """Resolve one immutable calibration by its durable identity."""
+
+        self.audit_integrity()
+        matches = [
+            artifact
+            for _, artifact, _ in self._indexed_entries()
+            if artifact.calibration_id == calibration_id
+        ]
+        if len(matches) != 1:
+            raise CalibrationError(f"calibration_id {calibration_id!r} is missing or ambiguous")
+        return matches[0]
 
     def _load_event(self, event: Mapping[str, Any]) -> tuple[CalibrationArtifact, Path]:
         if event.get("event_type") != "model_calibrated":
@@ -260,7 +287,7 @@ class CalibrationStore:
             if existing.calibration_id == artifact.calibration_id
         ]
         if indexed:
-            if len(indexed) != 1 or indexed[0][1] != artifact:
+            if len(indexed) != 1 or not self._same_reproducible_fit(indexed[0][1], artifact):
                 raise IntegrityError(f"calibration ID collision: {artifact.calibration_id}")
             self.audit_integrity()
             event, _, existing_path = indexed[0]
@@ -401,6 +428,13 @@ def calibrate(
             random_seed=random_seed,
             anchor_min_improvement=config.training.anchor_min_relative_improvement,
             likelihood_stability_margin=config.training.likelihood_stability_margin,
+            objective_weights=(
+                config.objective.p_ge_3_weight,
+                config.objective.p_ge_4_weight,
+                config.objective.three_plus_mega_weight,
+                config.objective.four_plus_weight,
+            ),
+            objective_mode=config.objective.mode,
         )
         model = selection.model
         selected_timestamp = created

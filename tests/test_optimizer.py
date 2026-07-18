@@ -3,20 +3,30 @@ from __future__ import annotations
 from collections import Counter
 from datetime import date, timedelta
 from itertools import combinations
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from slp_model.application import Application
 from slp_model.constraints import validate_bundle
+from slp_model.fair_odds import exact_uniform_metrics, fair_uniform_model
 from slp_model.modeling import ComponentParameters, ModelParameters, fit_model
 from slp_model.models import Draw, Ticket
 from slp_model.optimizer import (
     ObjectiveWeights,
     OptimizationError,
+    OptimizerConstraints,
     measure_bundle_marginals,
     optimize_bundle,
+    optimize_fair_coverage,
 )
-from slp_model.simulation import Candidate, generate_candidate_pool
+from slp_model.simulation import (
+    CANDIDATE_POOL_ALGORITHM_VERSION,
+    LEGACY_CANDIDATE_POOL_ALGORITHM_VERSION,
+    Candidate,
+    generate_candidate_pool,
+)
 
 
 def _model():
@@ -168,3 +178,106 @@ def test_objective_weight_knobs_are_validated() -> None:
         ObjectiveWeights(aggressive_secondary_multiplier=0.99)
     with pytest.raises(ValueError, match="cannot be negative"):
         ObjectiveWeights(mega_repeat_penalty=-0.01)
+
+
+def test_fair_optimizer_reaches_exact_coverage_certificate() -> None:
+    model = fair_uniform_model(_model())
+    seed = 13_628_164_553_973_667_705
+    pool = generate_candidate_pool(
+        model,
+        size=50_000,
+        seed=seed,
+    )
+
+    result = optimize_fair_coverage(
+        pool,
+        model,
+        seed=seed ^ 0xA5A5A5A55A5A5A5A,
+        constraints=OptimizerConstraints(
+            max_main_overlap=1,
+            pair_cap=1,
+            mega_soft_cap=1,
+            mega_hard_cap=2,
+        ),
+        marginal_simulations=128,
+        restarts=1,
+    )
+    exact = exact_uniform_metrics(result.tickets)
+    report = validate_bundle(
+        result.tickets,
+        max_overlap=1,
+        pair_cap=1,
+        mega_hard_cap=2,
+    )
+
+    assert pool.algorithm_version == CANDIDATE_POOL_ALGORITHM_VERSION
+    assert pool.content_sha256() == (
+        "ad61dea89d07af4ade6a7094f8fc9b547a99b2fdfa1f01706a44edac477f2c7e"
+    )
+    assert exact.covered_ge_3_mains_count == 258_582
+    assert exact.covered_ge_4_mains_count == 6_330
+    assert exact.covered_3_plus_mega_count == 264_630
+    assert exact.covered_jackpot_count == 30
+    assert report.maximum_pairwise_overlap == 1
+    assert report.maximum_pair_repetition == 1
+    assert report.maximum_mega_repetition <= 2
+
+
+@pytest.mark.parametrize(
+    ("bundle_id", "expected_digest"),
+    (
+        (
+            "slp-2026-07-18-v3-b675d398a4163433",
+            "f560992a8c2abe5376211f5102bcd7cda6116f0adc2d043eb2f5ab203b26fb72",
+        ),
+        (
+            "slp-2026-07-18-v5-ca0077ce15c2753f",
+            "39fc94d4a9566219cc69f79649aae6e1c59d123917c38297b9383d8f517ac07f",
+        ),
+    ),
+)
+def test_committed_legacy_candidate_pool_identity_is_preserved(
+    bundle_id: str, expected_digest: str
+) -> None:
+    app = Application.create(project_root=Path("."))
+    bundle = app.resolve_bundle(bundle_id)
+    algorithm = (
+        bundle.metadata.candidate_pool_algorithm_version or LEGACY_CANDIDATE_POOL_ALGORITHM_VERSION
+    )
+
+    assert algorithm == LEGACY_CANDIDATE_POOL_ALGORITHM_VERSION
+    assert bundle.metadata.candidate_pool_sha256 == expected_digest
+
+
+@pytest.mark.skipif(
+    np.__version__ != "2.5.1",
+    reason="v1 forensic replay requires its canonical NumPy runtime",
+)
+@pytest.mark.parametrize(
+    "bundle_id",
+    (
+        "slp-2026-07-18-v3-b675d398a4163433",
+        "slp-2026-07-18-v5-ca0077ce15c2753f",
+    ),
+)
+def test_committed_legacy_candidate_pool_replays_in_canonical_runtime(bundle_id: str) -> None:
+    app = Application.create(project_root=Path("."))
+    bundle = app.resolve_bundle(bundle_id)
+    calibration = app.calibration_store.find(bundle.metadata.calibration_id)
+    current = app.history_store.load_latest()
+    assert current is not None
+    previous = next(
+        draw for draw in current[0] if draw.draw_date == bundle.metadata.history_cutoff_date
+    )
+    algorithm = (
+        bundle.metadata.candidate_pool_algorithm_version or LEGACY_CANDIDATE_POOL_ALGORITHM_VERSION
+    )
+    pool = generate_candidate_pool(
+        calibration.restore_model(),
+        size=bundle.metadata.simulation.candidate_pool_size,
+        seed=bundle.metadata.random_seed,
+        previous_draw=previous,
+        algorithm_version=algorithm,
+    )
+
+    assert pool.content_sha256() == bundle.metadata.candidate_pool_sha256
