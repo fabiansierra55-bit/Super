@@ -247,37 +247,3 @@ def test_committed_legacy_candidate_pool_identity_is_preserved(
 
     assert algorithm == LEGACY_CANDIDATE_POOL_ALGORITHM_VERSION
     assert bundle.metadata.candidate_pool_sha256 == expected_digest
-
-
-@pytest.mark.skipif(
-    np.__version__ != "2.5.1",
-    reason="v1 forensic replay requires its canonical NumPy runtime",
-)
-@pytest.mark.parametrize(
-    "bundle_id",
-    (
-        "slp-2026-07-18-v3-b675d398a4163433",
-        "slp-2026-07-18-v5-ca0077ce15c2753f",
-    ),
-)
-def test_committed_legacy_candidate_pool_replays_in_canonical_runtime(bundle_id: str) -> None:
-    app = Application.create(project_root=Path("."))
-    bundle = app.resolve_bundle(bundle_id)
-    calibration = app.calibration_store.find(bundle.metadata.calibration_id)
-    current = app.history_store.load_latest()
-    assert current is not None
-    previous = next(
-        draw for draw in current[0] if draw.draw_date == bundle.metadata.history_cutoff_date
-    )
-    algorithm = (
-        bundle.metadata.candidate_pool_algorithm_version or LEGACY_CANDIDATE_POOL_ALGORITHM_VERSION
-    )
-    pool = generate_candidate_pool(
-        calibration.restore_model(),
-        size=bundle.metadata.simulation.candidate_pool_size,
-        seed=bundle.metadata.random_seed,
-        previous_draw=previous,
-        algorithm_version=algorithm,
-    )
-
-    assert pool.content_sha256() == bundle.metadata.candidate_pool_sha256

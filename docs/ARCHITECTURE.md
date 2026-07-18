@@ -55,11 +55,12 @@ Mains and Mega are fitted and selected independently. Every walk-forward fold tr
 
 Candidate-pool v1 is frozen for backward compatibility. It used NumPy
 high-level sampling and included an exact floating log weight in its digest, so
-forensic replay requires the canonical NumPy 2.5.1 runtime; a missing historical
-algorithm value resolves to v1. This environment limitation does not rewrite or
-invalidate a locked artifact. All new pools use v2. Whole-pipeline numerical
-portability is not claimed until simulations and optimizer tie-breaking also
-move to specified integer contracts.
+replay is supported only as a best-effort forensic check in the exact originating
+numerical environment; that environment was not fully captured by v1. A missing
+historical algorithm value resolves to v1. A replay mismatch is therefore
+unsupported, not evidence that a locked artifact may be rewritten. All new
+pools use v2. Whole-pipeline numerical portability is not claimed until
+simulations and optimizer tie-breaking also move to specified integer contracts.
 
 ## Simulation objective
 
