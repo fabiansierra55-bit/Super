@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "recovery_id": "slp-lifecycle-recovery-2026-08-02",
+  "incident": {
+    "cause": "bot-created artifact pull requests required first-time-contributor workflow approval, so the required ci check never started and protected main remained at the July 18 lifecycle state",
+    "incident_issue": "https://github.com/fabiansierra55-bit/Super/issues/12",
+    "stalled_main_commit": "542e5df18cba4ab61f62fba602c80ed75dafa637",
+    "representative_failed_run": "https://github.com/fabiansierra55-bit/Super/actions/runs/30737848154",
+    "representative_error": "latest result skips one or more cycle dates; refusing to create an after-the-draw prediction"
+  },
+  "recovery": {
+    "authoritative_artifact_pr": "https://github.com/fabiansierra55-bit/Super/pull/10",
+    "artifact_pr_ci_run": "https://github.com/fabiansierra55-bit/Super/actions/runs/29988682973",
+    "artifact_pr_merge_commit": "073ed93086c3e5f4e7f86fc1dee2f3ee89d97e4d",
+    "scored_bundle_id": "slp-2026-07-25-v1-765d7003bbcfc8f7",
+    "score_id": "score-2026-07-25-f5ae88020df3c4c0",
+    "verified_history_snapshot": {
+      "artifact": "data/history/versions/history-2026-08-01-84e27f3f727ceff1.json",
+      "content_sha256": "84e27f3f727ceff1849996c846b1c5f881e781a74f0ac09a7ddd64b1a213a3fe",
+      "draw_count": 111,
+      "history_cutoff_date": "2026-08-01"
+    },
+    "calibration_id": "cal-e154b96c4777b942ba33",
+    "next_bundle": {
+      "bundle_id": "slp-2026-08-05-v1-3ca0537bd63d905e",
+      "generated_timestamp_utc": "2026-08-03T00:40:23.772978Z",
+      "intended_draw_date": "2026-08-05",
+      "history_cutoff_date": "2026-08-01",
+      "candidate_pool_size": 50000,
+      "simulation_count": 175000,
+      "random_seed": 8085094946035339079
+    }
+  },
+  "verified_unscored_gaps": [
+    {
+      "draw_date": "2026-07-29",
+      "draw_id": "4103",
+      "mains": [5, 13, 19, 22, 27],
+      "mega": 7,
+      "verification_comparison_sha256": "19c3202a121ae98e0c94a4492e783f4b0b9b9d2d3cb120712aef5a775d7bac9f",
+      "disposition": "verified_history_only",
+      "reason": "no prediction bundle was locked before the draw"
+    },
+    {
+      "draw_date": "2026-08-01",
+      "draw_id": "4104",
+      "mains": [29, 30, 37, 41, 44],
+      "mega": 18,
+      "verification_comparison_sha256": "7a86ed6d3f080ee0acd1255d37d7d3bfb27ca1d9b6fa4e6e590fa9cda9a2b663",
+      "disposition": "verified_history_only",
+      "reason": "no prediction bundle was locked before the draw"
+    }
+  ],
+  "integrity_assertions": {
+    "historical_locked_bundles_mutated": false,
+    "retroactive_prediction_bundles_created": false,
+    "unverified_results_added": false,
+    "missing_bundles_scored": false
+  }
+}
